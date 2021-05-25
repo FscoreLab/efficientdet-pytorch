@@ -9,6 +9,7 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
+from effdet.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 import os
 import argparse
 import time
@@ -35,6 +36,10 @@ try:
         has_native_amp = True
 except AttributeError:
     pass
+
+from torch import nn
+from torch.utils.tensorboard import SummaryWriter
+from clearml import Task
 
 from effdet import create_model, unwrap_bench, create_loader, create_dataset, create_evaluator
 from effdet.data import resolve_input_config, SkipSubset
@@ -217,10 +222,22 @@ def _parse_args():
     args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
     return args, args_text
 
+def _freeze_bn(model):
+    """Freeze BatchNorm layers."""
+    for layer in model.modules():
+        if isinstance(layer, nn.BatchNorm2d):
+            layer.eval()
 
 def main():
     setup_default_logging()
     args, args_text = _parse_args()
+
+    project_name = "Pochta/VIDEOANAL_detection"
+    task_name = "efficientdet_d5"
+    output_uri = (
+        "s3://astralai-trains/videoanal/efficientdet"  # path for saving models (torch.save) with clearml hooks
+    )
+    Task.init(project_name=project_name, task_name=task_name, output_uri=output_uri)
 
     args.pretrained_backbone = not args.no_pretrained_backbone
     args.prefetcher = not args.no_prefetcher
@@ -282,6 +299,7 @@ def main():
             soft_nms=args.soft_nms,
             bench_labeler=args.bench_labeler,
             checkpoint_path=args.initial_checkpoint,
+            image_size=(512, 768),
         )
     model_config = model.config  # grab before we obscure with DP/DDP wrappers
 
@@ -398,15 +416,19 @@ def main():
         with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
             f.write(args_text)
 
+    writer = SummaryWriter(log_dir=output_dir)
+
     try:
         for epoch in range(start_epoch, num_epochs):
             if args.distributed:
                 loader_train.sampler.set_epoch(epoch)
 
             train_metrics = train_epoch(
+                writer,
                 epoch, model, loader_train, optimizer, args,
                 lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
                 amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema)
+            writer.add_scalar("Loss/train", train_metrics['loss'], global_step=epoch)
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                 if args.local_rank == 0:
@@ -421,6 +443,9 @@ def main():
                 eval_metrics = validate(model_ema.module, loader_eval, args, evaluator, log_suffix=' (EMA)')
             else:
                 eval_metrics = validate(model, loader_eval, args, evaluator)
+
+            writer.add_scalar("Loss/val", eval_metrics['loss'], global_step=epoch)
+            writer.add_scalar("mAP/val", eval_metrics['map'], global_step=epoch)
 
             if lr_scheduler is not None:
                 # step LR for next epoch
@@ -478,7 +503,7 @@ def create_datasets_and_loaders(
         re_prob=args.reprob,
         re_mode=args.remode,
         re_count=args.recount,
-        # color_jitter=args.color_jitter,
+        color_jitter=args.color_jitter,
         # auto_augment=args.aa,
         interpolation=args.train_interpolation or input_config['interpolation'],
         fill_color=input_config['fill_color'],
@@ -518,6 +543,7 @@ def create_datasets_and_loaders(
 
 
 def train_epoch(
+        writer,
         epoch, model, loader, optimizer, args,
         lr_scheduler=None, saver=None, output_dir='', amp_autocast=suppress, loss_scaler=None, model_ema=None):
 
@@ -562,6 +588,8 @@ def train_epoch(
         if last_batch or batch_idx % args.log_interval == 0:
             lrl = [param_group['lr'] for param_group in optimizer.param_groups]
             lr = sum(lrl) / len(lrl)
+            if last_batch:
+                writer.add_scalar("LR", lr, global_step=epoch)
 
             if args.distributed:
                 reduced_loss = reduce_tensor(loss.data, args.world_size)
@@ -584,6 +612,7 @@ def train_epoch(
                         rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
                         lr=lr,
                         data_time=data_time_m))
+                writer.add_scalar("Loss_step/train", losses_m.val, global_step=(epoch * last_idx + batch_idx))
 
                 if args.save_images and output_dir:
                     torchvision.utils.save_image(

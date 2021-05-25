@@ -9,6 +9,8 @@ from copy import deepcopy
 from PIL import Image
 import numpy as np
 import torch
+import torchvision
+from torchvision.transforms import RandomApply, GaussianBlur, ColorJitter
 
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_DEFAULT_STD = (0.229, 0.224, 0.225)
@@ -240,6 +242,15 @@ class Compose:
             img, annotations = t(img, annotations)
         return img, annotations
 
+class TorchTransform:
+
+    def __init__(self, transform):
+        self.transform = transform
+
+    def __call__(self, img, annotations):
+        img = self.transform(img)
+        return img, annotations
+
 
 def transforms_coco_eval(
         img_size=224,
@@ -269,14 +280,19 @@ def transforms_coco_train(
         use_prefetcher=False,
         fill_color='mean',
         mean=IMAGENET_DEFAULT_MEAN,
-        std=IMAGENET_DEFAULT_STD):
+        std=IMAGENET_DEFAULT_STD,
+        color_jitter=0.0):
 
     fill_color = resolve_fill_color(fill_color, mean)
 
     image_tfl = [
         RandomFlip(horizontal=True, prob=0.5),
         RandomResizePad(
-            target_size=img_size, interpolation=interpolation, fill_color=fill_color),
+            target_size=img_size, interpolation=interpolation, fill_color=fill_color, scale=(0.9, 1.5)),
+        TorchTransform(torchvision.transforms.Compose([
+            RandomApply([GaussianBlur(5)], p=0.5),
+            RandomApply([ColorJitter(color_jitter, color_jitter, color_jitter)], p=0.5),
+        ])),
         ImageToNumpy(),
     ]
 

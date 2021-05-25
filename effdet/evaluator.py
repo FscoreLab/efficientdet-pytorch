@@ -6,7 +6,7 @@ import logging
 import time
 import numpy as np
 
-from .distributed import synchronize, is_main_process, all_gather_container
+from effdet.distributed import synchronize, is_main_process, all_gather_container
 from pycocotools.cocoeval import COCOeval
 
 # FIXME experimenting with speedups for OpenImages eval, it's slow

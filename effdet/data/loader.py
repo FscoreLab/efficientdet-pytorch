@@ -172,6 +172,7 @@ def create_loader(
         anchor_labeler=None,
         transform_fn=None,
         collate_fn=None,
+        color_jitter=0.0,
 ):
     if isinstance(input_size, tuple):
         img_size = input_size[-2:]
@@ -193,7 +194,8 @@ def create_loader(
                 use_prefetcher=use_prefetcher,
                 fill_color=fill_color,
                 mean=mean,
-                std=std)
+                std=std,
+                color_jitter=color_jitter)
         else:
             transform = transforms_coco_eval(
                 img_size,

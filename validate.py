@@ -119,6 +119,7 @@ def validate(args):
             soft_nms=args.soft_nms,
             checkpoint_path=args.checkpoint,
             checkpoint_ema=args.use_ema,
+            image_size=(512, 768),
             **extra_args,
         )
     model_config = bench.config

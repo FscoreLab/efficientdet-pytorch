@@ -14,6 +14,14 @@ class CocoCfg:
     num_classes: int = 80
     splits: Dict[str, dict] = None
 
+@dataclass
+class CocoCrowdHuman(CocoCfg):
+    variant: str = 'crowd_human'
+    splits: Dict[str, dict] = field(default_factory=lambda: dict(
+        train=dict(ann_filename='train/Anns/annotation_visible_train.json', img_dir='train/Images', has_labels=True),
+        val=dict(ann_filename='Val/Anns/annotation_visible_val.json', img_dir='Val/Images', has_labels=True),
+    ))
+
 
 @dataclass
 class Coco2017Cfg(CocoCfg):
