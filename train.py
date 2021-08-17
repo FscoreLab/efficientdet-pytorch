@@ -416,6 +416,7 @@ def main():
         with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
             f.write(args_text)
 
+    best_map = -1.0
     writer = SummaryWriter(log_dir=output_dir)
 
     try:
@@ -446,6 +447,14 @@ def main():
 
             writer.add_scalar("Loss/val", eval_metrics['loss'], global_step=epoch)
             writer.add_scalar("mAP/val", eval_metrics['map'], global_step=epoch)
+
+            if (eval_metrics["map"] > best_map):
+                save_path = os.path.join(saver.checkpoint_dir, "best_model.pth.tar")
+                saver._save(save_path, epoch)
+
+            if epoch % 2 == 0:
+                save_path = os.path.join(saver.checkpoint_dir, f"model_ep{epoch}.pth.tar")
+                saver._save(save_path, epoch)
 
             if lr_scheduler is not None:
                 # step LR for next epoch
