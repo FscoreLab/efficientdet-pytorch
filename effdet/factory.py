@@ -37,7 +37,7 @@ def create_model_from_config(
 
     # pretrained weights are always spec'd for original config, load them before we change the model
     if pretrained:
-        load_pretrained(model, config.url)
+        load_pretrained(model, config.url, strict=False)
 
     # reset model head if num_classes doesn't match configs
     if num_classes is not None and num_classes != config.num_classes:

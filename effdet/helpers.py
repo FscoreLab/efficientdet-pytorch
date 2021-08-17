@@ -19,4 +19,8 @@ def load_pretrained(model, url, filter_fn=None, strict=True):
     state_dict = load_state_dict_from_url(url, progress=False, map_location='cpu')
     if filter_fn is not None:
         state_dict = filter_fn(state_dict)
+    state_dict.pop("class_net.predict.conv_pw.weight")
+    state_dict.pop("class_net.predict.conv_pw.bias")
+    state_dict.pop("box_net.predict.conv_pw.weight")
+    state_dict.pop("box_net.predict.conv_pw.bias")
     model.load_state_dict(state_dict, strict=strict)

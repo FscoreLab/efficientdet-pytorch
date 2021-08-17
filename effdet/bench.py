@@ -3,10 +3,19 @@
 Hacked together by Ross Wightman
 """
 from typing import Optional, Dict, List
+import einops
 import torch
 import torch.nn as nn
 from .anchors import Anchors, AnchorLabeler, generate_detections
 from .loss import DetectionLoss
+
+
+def _sample_outputs(outputs: List[torch.Tensor], num_levels: int) -> List[torch.Tensor]:
+    for level in range(num_levels):
+        mean, std, weights = torch.tensor_split(outputs[level].permute(0, 2, 3, 1), 3, dim=-1)
+        weights = torch.softmax(weights, dim=-1)
+        outputs[level] = einops.reduce(mean * weights, "b h w (c k) -> b h w c", "sum", k=4) # TODO: 4 as parameter
+    return outputs
 
 
 def _post_process(
@@ -33,12 +42,15 @@ def _post_process(
         num_classes (int): number of output classes
     """
     batch_size = cls_outputs[0].shape[0]
+
+    cls_outputs = _sample_outputs(cls_outputs, num_levels)
     cls_outputs_all = torch.cat([
-        cls_outputs[level].permute(0, 2, 3, 1).reshape([batch_size, -1, num_classes])
+        cls_outputs[level].reshape([batch_size, -1, num_classes])
         for level in range(num_levels)], 1)
 
+    box_outputs = _sample_outputs(box_outputs, num_levels)
     box_outputs_all = torch.cat([
-        box_outputs[level].permute(0, 2, 3, 1).reshape([batch_size, -1, 4])
+        box_outputs[level].reshape([batch_size, -1, 4])
         for level in range(num_levels)], 1)
 
     _, cls_topk_indices_all = torch.topk(cls_outputs_all.reshape(batch_size, -1), dim=1, k=max_detection_points)

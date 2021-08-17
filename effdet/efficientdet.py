@@ -563,8 +563,8 @@ class EfficientDet(nn.Module):
             pretrained=pretrained_backbone, **config.backbone_args)
         feature_info = get_feature_info(self.backbone)
         self.fpn = BiFpn(self.config, feature_info)
-        self.class_net = HeadNet(self.config, num_outputs=self.config.num_classes)
-        self.box_net = HeadNet(self.config, num_outputs=4)
+        self.class_net = HeadNet(self.config, num_outputs=self.config.num_classes * self.config.gaussian_count * 3)
+        self.box_net = HeadNet(self.config, num_outputs=4 * self.config.gaussian_count * 3)
 
         for n, m in self.named_modules():
             if 'backbone' not in n:
@@ -590,7 +590,7 @@ class EfficientDet(nn.Module):
         set_config_readonly(self.config)
 
         if reset_class_head:
-            self.class_net = HeadNet(self.config, num_outputs=self.config.num_classes)
+            self.class_net = HeadNet(self.config, num_outputs=self.config.num_classes * self.config.gaussian_count * 3)
             for n, m in self.class_net.named_modules(prefix='class_net'):
                 if alternate_init:
                     _init_weight_alt(m, n)
@@ -598,7 +598,7 @@ class EfficientDet(nn.Module):
                     _init_weight(m, n)
 
         if reset_box_head:
-            self.box_net = HeadNet(self.config, num_outputs=4)
+            self.box_net = HeadNet(self.config, num_outputs=4 * self.config.gaussian_count * 3)
             for n, m in self.box_net.named_modules(prefix='box_net'):
                 if alternate_init:
                     _init_weight_alt(m, n)

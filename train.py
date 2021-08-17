@@ -233,7 +233,7 @@ def main():
     args, args_text = _parse_args()
 
     project_name = "Pochta/VIDEOANAL_detection"
-    task_name = "efficientdet_d5"
+    task_name = "crowd_human_efficientdet_d3_gmm_1"
     output_uri = (
         "s3://astralai-trains/videoanal/efficientdet"  # path for saving models (torch.save) with clearml hooks
     )
@@ -440,9 +440,9 @@ def main():
                 if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                     distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
 
-                eval_metrics = validate(model_ema.module, loader_eval, args, evaluator, log_suffix=' (EMA)')
+                eval_metrics = validate(writer, epoch, model_ema.module, loader_eval, args, evaluator, log_suffix=' (EMA)')
             else:
-                eval_metrics = validate(model, loader_eval, args, evaluator)
+                eval_metrics = validate(writer, epoch, model, loader_eval, args, evaluator)
 
             writer.add_scalar("Loss/val", eval_metrics['loss'], global_step=epoch)
             writer.add_scalar("mAP/val", eval_metrics['map'], global_step=epoch)
@@ -542,6 +542,12 @@ def create_datasets_and_loaders(
     return loader_train, loader_eval, evaluator
 
 
+def denorm_images(imgs):
+    mean = torch.tensor([x for x in IMAGENET_DEFAULT_MEAN]).cuda().view(1, 3, 1, 1)
+    std = torch.tensor([x for x in IMAGENET_DEFAULT_STD]).cuda().view(1, 3, 1, 1)
+    return imgs.float() * std + mean
+
+
 def train_epoch(
         writer,
         epoch, model, loader, optimizer, args,
@@ -557,6 +563,9 @@ def train_epoch(
     last_idx = len(loader) - 1
     num_updates = epoch * len(loader)
     for batch_idx, (input, target) in enumerate(loader):
+        if epoch % 5 == 0 and batch_idx == 0:
+            writer.add_images("samples/train", denorm_images(input), global_step=epoch)
+            
         last_batch = batch_idx == last_idx
         data_time_m.update(time.time() - end)
 
@@ -629,6 +638,7 @@ def train_epoch(
             lr_scheduler.step_update(num_updates=num_updates, metric=losses_m.avg)
 
         end = time.time()
+        # break
         # end for
 
     if hasattr(optimizer, 'sync_lookahead'):
@@ -637,7 +647,7 @@ def train_epoch(
     return OrderedDict([('loss', losses_m.avg)])
 
 
-def validate(model, loader, args, evaluator=None, log_suffix=''):
+def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
     batch_time_m = AverageMeter()
     losses_m = AverageMeter()
 
@@ -647,6 +657,8 @@ def validate(model, loader, args, evaluator=None, log_suffix=''):
     last_idx = len(loader) - 1
     with torch.no_grad():
         for batch_idx, (input, target) in enumerate(loader):
+            if epoch % 5 == 0 and batch_idx == 0:
+                writer.add_images("samples/valid", denorm_images(input), global_step=epoch)
             last_batch = batch_idx == last_idx
 
             output = model(input, target)

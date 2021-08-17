@@ -5,6 +5,7 @@ https://github.com/google/automl/tree/master/efficientdet
 
 Copyright 2020 Ross Wightman
 """
+import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -47,6 +48,7 @@ def focal_loss_legacy(logits, targets, alpha: float, gamma: float, normalizer):
     return weighted_loss / normalizer
 
 
+@torch.jit.ignore()
 def new_focal_loss(logits, targets, alpha: float, gamma: float, normalizer, label_smoothing: float = 0.01):
     """Compute the focal loss between `logits` and the golden `target` values.
 
@@ -67,6 +69,13 @@ def new_focal_loss(logits, targets, alpha: float, gamma: float, normalizer, labe
     Returns:
         loss: A float32 scalar representing normalized total loss.
     """
+
+    mean, std, weights = torch.tensor_split(logits, 3, dim=-1)
+    std = torch.sqrt(torch.sigmoid(std))
+    normal_logits = std * torch.randn(std.shape, device=std.device) + mean
+    weights = torch.softmax(weights, dim=-1)
+    logits = einops.reduce(normal_logits * weights, "b h w (c k) -> b h w c", "sum", k=4) # TODO: 4 as parameter
+
     # compute focal loss multipliers before label smoothing, such that it will not blow up the loss.
     pred_prob = logits.sigmoid()
     targets = targets.to(logits.dtype)
@@ -124,11 +133,19 @@ def smooth_l1_loss(
         return loss.sum()
 
 
+@torch.jit.ignore()
 def _box_loss(box_outputs, box_targets, num_positives, delta: float = 0.1):
     """Computes box regression loss."""
     # delta is typically around the mean value of regression target.
     # for instances, the regression targets of 512x512 input with 6 anchors on
     # P3-P7 pyramid is about [0.1, 0.1, 0.2, 0.2].
+
+    mean, std, weights = torch.tensor_split(box_outputs, 3, dim=-1)
+    std = torch.sqrt(torch.sigmoid(std))
+    normal_logits = std * torch.randn(std.shape, device=std.device) + mean
+    weights = torch.softmax(weights, dim=-1)
+    box_outputs = einops.reduce(normal_logits * weights, "b h w (c k) -> b h w c", "sum", k=4) # TODO: 4 as parameter
+
     normalizer = num_positives * 4.0
     mask = box_targets != 0.0
     box_loss = huber_loss(box_outputs, box_targets, weights=mask, delta=delta, size_average=False)
