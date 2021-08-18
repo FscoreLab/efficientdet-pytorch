@@ -13,7 +13,9 @@ from .loss import DetectionLoss
 def _sample_outputs(outputs: List[torch.Tensor], num_levels: int) -> List[torch.Tensor]:
     for level in range(num_levels):
         mean, std, weights = torch.tensor_split(outputs[level].permute(0, 2, 3, 1), 3, dim=-1)
+        weights = einops.rearrange(weights, "b h w (c k) -> b h w c k", k=4)
         weights = torch.softmax(weights, dim=-1)
+        weights = einops.rearrange(weights, "b h w c k -> b h w (c k)", k=4)
         outputs[level] = einops.reduce(mean * weights, "b h w (c k) -> b h w c", "sum", k=4) # TODO: 4 as parameter
     return outputs
 

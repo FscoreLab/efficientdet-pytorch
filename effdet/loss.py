@@ -13,6 +13,17 @@ import torch.nn.functional as F
 from typing import Optional, List, Tuple
 
 
+def _sample_outputs(outputs: torch.Tensor) -> torch.Tensor:
+    mean, std, weights = torch.tensor_split(outputs, 3, dim=-1)
+    std = torch.sqrt(torch.sigmoid(std))
+    normal_outputs = std * torch.randn(std.shape, device=std.device) + mean
+    weights = einops.rearrange(weights, "b h w (c k) -> b h w c k", k=4)
+    weights = torch.softmax(weights, dim=-1)
+    weights = einops.rearrange(weights, "b h w c k -> b h w (c k)", k=4)
+    outputs = einops.reduce(normal_outputs * weights, "b h w (c k) -> b h w c", "sum", k=4) # TODO: 4 as parameter
+    return outputs
+
+
 def focal_loss_legacy(logits, targets, alpha: float, gamma: float, normalizer):
     """Compute the focal loss between `logits` and the golden `target` values.
 
@@ -70,11 +81,7 @@ def new_focal_loss(logits, targets, alpha: float, gamma: float, normalizer, labe
         loss: A float32 scalar representing normalized total loss.
     """
 
-    mean, std, weights = torch.tensor_split(logits, 3, dim=-1)
-    std = torch.sqrt(torch.sigmoid(std))
-    normal_logits = std * torch.randn(std.shape, device=std.device) + mean
-    weights = torch.softmax(weights, dim=-1)
-    logits = einops.reduce(normal_logits * weights, "b h w (c k) -> b h w c", "sum", k=4) # TODO: 4 as parameter
+    logits = _sample_outputs(logits)
 
     # compute focal loss multipliers before label smoothing, such that it will not blow up the loss.
     pred_prob = logits.sigmoid()
@@ -140,11 +147,7 @@ def _box_loss(box_outputs, box_targets, num_positives, delta: float = 0.1):
     # for instances, the regression targets of 512x512 input with 6 anchors on
     # P3-P7 pyramid is about [0.1, 0.1, 0.2, 0.2].
 
-    mean, std, weights = torch.tensor_split(box_outputs, 3, dim=-1)
-    std = torch.sqrt(torch.sigmoid(std))
-    normal_logits = std * torch.randn(std.shape, device=std.device) + mean
-    weights = torch.softmax(weights, dim=-1)
-    box_outputs = einops.reduce(normal_logits * weights, "b h w (c k) -> b h w c", "sum", k=4) # TODO: 4 as parameter
+    box_outputs = _sample_outputs(box_outputs)
 
     normalizer = num_positives * 4.0
     mask = box_targets != 0.0

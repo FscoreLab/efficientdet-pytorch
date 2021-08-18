@@ -677,7 +677,7 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
                 for i in range(len(images)):
                     boxes = output["detections"][i][:, :4]
                     scores = output["detections"][i][:, 4]
-                    scores_over_thresh = scores > 0.5
+                    scores_over_thresh = scores > 0.4
                     boxes = boxes[scores_over_thresh]
                     images[i] = torchvision.utils.draw_bounding_boxes(images[i], boxes, colors=[(255, 0, 0)] * len(boxes))
                 writer.add_images("samples/valid", images, global_step=epoch)
