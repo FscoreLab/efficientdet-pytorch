@@ -666,12 +666,22 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
     last_idx = len(loader) - 1
     with torch.no_grad():
         for batch_idx, (input, target) in enumerate(loader):
-            if epoch % 5 == 0 and batch_idx == 0:
-                writer.add_images("samples/valid", denorm_images(input), global_step=epoch)
             last_batch = batch_idx == last_idx
 
             output = model(input, target)
             loss = output['loss']
+
+            if epoch % 5 == 0 and batch_idx == 0:
+                images = denorm_images(input) * 255
+                images = images.to(torch.uint8).cpu()
+                for i in range(len(images)):
+                    boxes = output["detections"][i][:, :4]
+                    scores = output["detections"][i][:, 4]
+                    scores_over_thresh = scores > 0.5
+                    boxes = boxes[scores_over_thresh]
+                    images[i] = torchvision.utils.draw_bounding_boxes(images[i], boxes, colors=[(255, 0, 0)] * len(boxes))
+                writer.add_images("samples/valid", images, global_step=epoch)
+
 
             if evaluator is not None:
                 evaluator.add_predictions(output['detections'], target)
