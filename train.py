@@ -173,6 +173,7 @@ parser.add_argument('--dist-bn', type=str, default='',
                     help='Distribute BatchNorm stats between nodes after each epoch ("broadcast", "reduce", or "")')
 parser.add_argument('--seed', type=int, default=42, metavar='S',
                     help='random seed (default: 42)')
+parser.add_argument('--checkpoint-interval', type=int, default=5, metavar='N')
 parser.add_argument('--log-interval', type=int, default=50, metavar='N',
                     help='how many batches to wait before logging training status')
 parser.add_argument('--recovery-interval', type=int, default=0, metavar='N',
@@ -452,7 +453,7 @@ def main():
                 save_path = os.path.join(saver.checkpoint_dir, "best_model.pth.tar")
                 saver._save(save_path, epoch)
 
-            if epoch % 2 == 0:
+            if epoch % args.checkpoint_interval == 0:
                 save_path = os.path.join(saver.checkpoint_dir, f"model_ep{epoch}.pth.tar")
                 saver._save(save_path, epoch)
 
