@@ -5,11 +5,23 @@ https://github.com/google/automl/tree/master/efficientdet
 
 Copyright 2020 Ross Wightman
 """
+import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from typing import Optional, List, Tuple
+
+
+def _sample_outputs(outputs: torch.Tensor, num_gmm: int) -> torch.Tensor:
+    mean, var, weights = torch.tensor_split(outputs, 3, dim=-1)
+    std = torch.sqrt(torch.sigmoid(var))
+    normal_outputs = std * torch.randn(std.shape, device=std.device) + mean
+    weights = einops.rearrange(weights, "b h w (c k) -> b h w c k", k=num_gmm)
+    weights = torch.softmax(weights, dim=-1)
+    weights = einops.rearrange(weights, "b h w c k -> b h w (c k)", k=num_gmm)
+    outputs = einops.reduce(normal_outputs * weights, "b h w (c k) -> b h w c", "sum", k=num_gmm)
+    return outputs
 
 
 def focal_loss_legacy(logits, targets, alpha: float, gamma: float, normalizer):
@@ -47,7 +59,8 @@ def focal_loss_legacy(logits, targets, alpha: float, gamma: float, normalizer):
     return weighted_loss / normalizer
 
 
-def new_focal_loss(logits, targets, alpha: float, gamma: float, normalizer, label_smoothing: float = 0.01):
+@torch.jit.ignore()
+def new_focal_loss(logits, targets, num_gmm: int, alpha: float, gamma: float, normalizer, label_smoothing: float = 0.01):
     """Compute the focal loss between `logits` and the golden `target` values.
 
     'New' is not the best descriptor, but this focal loss impl matches recent versions of
@@ -67,6 +80,9 @@ def new_focal_loss(logits, targets, alpha: float, gamma: float, normalizer, labe
     Returns:
         loss: A float32 scalar representing normalized total loss.
     """
+
+    logits = _sample_outputs(logits, num_gmm)
+
     # compute focal loss multipliers before label smoothing, such that it will not blow up the loss.
     pred_prob = logits.sigmoid()
     targets = targets.to(logits.dtype)
@@ -124,11 +140,15 @@ def smooth_l1_loss(
         return loss.sum()
 
 
-def _box_loss(box_outputs, box_targets, num_positives, delta: float = 0.1):
+@torch.jit.ignore()
+def _box_loss(box_outputs, box_targets, num_positives, num_gmm: int, delta: float = 0.1):
     """Computes box regression loss."""
     # delta is typically around the mean value of regression target.
     # for instances, the regression targets of 512x512 input with 6 anchors on
     # P3-P7 pyramid is about [0.1, 0.1, 0.2, 0.2].
+
+    box_outputs = _sample_outputs(box_outputs, num_gmm)
+
     normalizer = num_positives * 4.0
     mask = box_targets != 0.0
     box_loss = huber_loss(box_outputs, box_targets, weights=mask, delta=delta, size_average=False)
@@ -149,6 +169,7 @@ def loss_fn(
         box_targets: List[torch.Tensor],
         num_positives: torch.Tensor,
         num_classes: int,
+        num_gmm: int,
         alpha: float,
         gamma: float,
         delta: float,
@@ -201,7 +222,7 @@ def loss_fn(
                 alpha=alpha, gamma=gamma, normalizer=num_positives_sum)
         else:
             cls_loss = new_focal_loss(
-                cls_outputs_at_level, cls_targets_at_level_oh,
+                cls_outputs_at_level, cls_targets_at_level_oh, num_gmm=num_gmm,
                 alpha=alpha, gamma=gamma, normalizer=num_positives_sum, label_smoothing=label_smoothing)
         cls_loss = cls_loss.view(bs, height, width, -1, num_classes)
         cls_loss = cls_loss * (cls_targets_at_level != -2).unsqueeze(-1)
@@ -211,6 +232,7 @@ def loss_fn(
             box_outputs[l].permute(0, 2, 3, 1).float(),
             box_targets_at_level,
             num_positives_sum,
+            num_gmm=num_gmm,
             delta=delta))
 
     # Sum per level losses to total loss.
@@ -231,6 +253,7 @@ class DetectionLoss(nn.Module):
         super(DetectionLoss, self).__init__()
         self.config = config
         self.num_classes = config.num_classes
+        self.num_gmm = config.gaussian_count
         self.alpha = config.alpha
         self.gamma = config.gamma
         self.delta = config.delta
@@ -255,5 +278,5 @@ class DetectionLoss(nn.Module):
 
         return l_fn(
             cls_outputs, box_outputs, cls_targets, box_targets, num_positives,
-            num_classes=self.num_classes, alpha=self.alpha, gamma=self.gamma, delta=self.delta,
+            num_classes=self.num_classes, num_gmm=self.num_gmm, alpha=self.alpha, gamma=self.gamma, delta=self.delta,
             box_loss_weight=self.box_loss_weight, label_smoothing=self.label_smoothing, legacy_focal=self.legacy_focal)

@@ -89,7 +89,13 @@ def clip_boxes_xyxy(boxes: torch.Tensor, size: torch.Tensor):
 
 
 def generate_detections(
-        cls_outputs, box_outputs, anchor_boxes, indices, classes,
+        cls_outputs,
+        cls_uncertainty_al: Optional[torch.Tensor],
+        cls_uncertainty_ep: Optional[torch.Tensor],
+        box_outputs,
+        box_uncertainty_al: Optional[torch.Tensor],
+        box_uncertainty_ep: Optional[torch.Tensor],
+        anchor_boxes, indices, classes,
         img_scale: Optional[torch.Tensor], img_size: Optional[torch.Tensor],
         max_det_per_image: int = 100, soft_nms: bool = False):
     """Generates detections with RetinaNet model outputs and anchors.
@@ -119,7 +125,7 @@ def generate_detections(
 
     Returns:
         detections: detection results in a tensor with shape [max_det_per_image, 6],
-            each row representing [x_min, y_min, x_max, y_max, score, class]
+            each row representing [x_min, y_min, x_max, y_max, score, class, box_uncertainty_al, box_uncertainty_ep, cls_uncertainty_al, cls_uncertainty_ep]
     """
     assert box_outputs.shape[-1] == 4
     assert anchor_boxes.shape[-1] == 4
@@ -146,6 +152,11 @@ def generate_detections(
     boxes = boxes[top_detection_idx]
     scores = scores[top_detection_idx, None]
     classes = classes[top_detection_idx, None] + 1  # back to class idx with background class = 0
+    if cls_uncertainty_al is not None and cls_uncertainty_ep is not None and box_uncertainty_al is not None and box_uncertainty_ep is not None:
+        cls_uncertainty_al = cls_uncertainty_al[top_detection_idx]
+        cls_uncertainty_ep = cls_uncertainty_ep[top_detection_idx]
+        box_uncertainty_al = box_uncertainty_al[top_detection_idx]
+        box_uncertainty_ep = box_uncertainty_ep[top_detection_idx]
 
     if img_scale is not None:
         boxes = boxes * img_scale
@@ -155,11 +166,16 @@ def generate_detections(
 
     # stack em and pad out to max_det_per_image if necessary
     num_det = len(top_detection_idx)
-    detections = torch.cat([boxes, scores, classes.float()], dim=1)
+    if cls_uncertainty_al is not None and cls_uncertainty_ep is not None and box_uncertainty_al is not None and box_uncertainty_ep is not None:
+        detections = torch.cat([boxes, scores, classes.float(),
+                                box_uncertainty_al, box_uncertainty_ep,
+                                cls_uncertainty_al, cls_uncertainty_ep], dim=1)
+    else:
+        detections = torch.cat([boxes, scores, classes.float()], dim=1)
     if num_det < max_det_per_image:
         detections = torch.cat([
             detections,
-            torch.zeros((max_det_per_image - num_det, 6), device=detections.device, dtype=detections.dtype)
+            torch.zeros((max_det_per_image - num_det, detections.shape[1]), device=detections.device, dtype=detections.dtype)
         ], dim=0)
     return detections
 

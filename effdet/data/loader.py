@@ -224,6 +224,7 @@ def create_loader(
         sampler=sampler,
         pin_memory=pin_mem,
         collate_fn=collate_fn,
+        drop_last=True,
     )
     if use_prefetcher:
         if is_training:

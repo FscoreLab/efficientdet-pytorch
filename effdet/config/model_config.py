@@ -12,6 +12,8 @@ from copy import deepcopy
 def default_detection_model_configs():
     """Returns a default detection configs."""
     h = OmegaConf.create()
+    
+    h.gaussian_count = 4
 
     # model name.
     h.name = 'tf_efficientdet_d1'

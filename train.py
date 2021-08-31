@@ -173,6 +173,7 @@ parser.add_argument('--dist-bn', type=str, default='',
                     help='Distribute BatchNorm stats between nodes after each epoch ("broadcast", "reduce", or "")')
 parser.add_argument('--seed', type=int, default=42, metavar='S',
                     help='random seed (default: 42)')
+parser.add_argument('--checkpoint-interval', type=int, default=5, metavar='N')
 parser.add_argument('--log-interval', type=int, default=50, metavar='N',
                     help='how many batches to wait before logging training status')
 parser.add_argument('--recovery-interval', type=int, default=0, metavar='N',
@@ -233,7 +234,7 @@ def main():
     args, args_text = _parse_args()
 
     project_name = "Pochta/VIDEOANAL_detection"
-    task_name = "efficientdet_d5"
+    task_name = "crowd_human_efficientdet_d3_gmm_1"
     output_uri = (
         "s3://astralai-trains/videoanal/efficientdet"  # path for saving models (torch.save) with clearml hooks
     )
@@ -416,6 +417,7 @@ def main():
         with open(os.path.join(output_dir, 'args.yaml'), 'w') as f:
             f.write(args_text)
 
+    best_map = -1.0
     writer = SummaryWriter(log_dir=output_dir)
 
     try:
@@ -440,12 +442,20 @@ def main():
                 if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                     distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
 
-                eval_metrics = validate(model_ema.module, loader_eval, args, evaluator, log_suffix=' (EMA)')
+                eval_metrics = validate(writer, epoch, model_ema.module, loader_eval, args, evaluator, log_suffix=' (EMA)')
             else:
-                eval_metrics = validate(model, loader_eval, args, evaluator)
+                eval_metrics = validate(writer, epoch, model, loader_eval, args, evaluator)
 
             writer.add_scalar("Loss/val", eval_metrics['loss'], global_step=epoch)
             writer.add_scalar("mAP/val", eval_metrics['map'], global_step=epoch)
+
+            if (eval_metrics["map"] > best_map):
+                save_path = os.path.join(saver.checkpoint_dir, "best_model.pth.tar")
+                saver._save(save_path, epoch)
+
+            if epoch % args.checkpoint_interval == 0:
+                save_path = os.path.join(saver.checkpoint_dir, f"model_ep{epoch}.pth.tar")
+                saver._save(save_path, epoch)
 
             if lr_scheduler is not None:
                 # step LR for next epoch
@@ -542,6 +552,12 @@ def create_datasets_and_loaders(
     return loader_train, loader_eval, evaluator
 
 
+def denorm_images(imgs):
+    mean = torch.tensor([x for x in IMAGENET_DEFAULT_MEAN]).cuda().view(1, 3, 1, 1)
+    std = torch.tensor([x for x in IMAGENET_DEFAULT_STD]).cuda().view(1, 3, 1, 1)
+    return imgs.float() * std + mean
+
+
 def train_epoch(
         writer,
         epoch, model, loader, optimizer, args,
@@ -557,6 +573,9 @@ def train_epoch(
     last_idx = len(loader) - 1
     num_updates = epoch * len(loader)
     for batch_idx, (input, target) in enumerate(loader):
+        if epoch % 5 == 0 and batch_idx == 0:
+            writer.add_images("samples/train", denorm_images(input), global_step=epoch)
+            
         last_batch = batch_idx == last_idx
         data_time_m.update(time.time() - end)
 
@@ -629,6 +648,7 @@ def train_epoch(
             lr_scheduler.step_update(num_updates=num_updates, metric=losses_m.avg)
 
         end = time.time()
+        # break
         # end for
 
     if hasattr(optimizer, 'sync_lookahead'):
@@ -637,7 +657,7 @@ def train_epoch(
     return OrderedDict([('loss', losses_m.avg)])
 
 
-def validate(model, loader, args, evaluator=None, log_suffix=''):
+def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
     batch_time_m = AverageMeter()
     losses_m = AverageMeter()
 
@@ -651,6 +671,18 @@ def validate(model, loader, args, evaluator=None, log_suffix=''):
 
             output = model(input, target)
             loss = output['loss']
+
+            if epoch % 5 == 0 and batch_idx == 0:
+                images = denorm_images(input) * 255
+                images = images.to(torch.uint8).cpu()
+                for i in range(len(images)):
+                    boxes = output["detections"][i][:, :4]
+                    scores = output["detections"][i][:, 4]
+                    scores_over_thresh = scores > 0.4
+                    boxes = boxes[scores_over_thresh]
+                    images[i] = torchvision.utils.draw_bounding_boxes(images[i], boxes, colors=[(255, 0, 0)] * len(boxes))
+                writer.add_images("samples/valid", images, global_step=epoch)
+
 
             if evaluator is not None:
                 evaluator.add_predictions(output['detections'], target)
