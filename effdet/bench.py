@@ -278,9 +278,10 @@ class ReidBench(nn.Module):
         config["fpn_channels"] = 256
         eba_config = OmegaConf.create()
         eba_config.update(config)
-        self.fuse_1 = nn.Sequential(nn.Conv2d(160, 256, 3, 2, 1), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256))
-        self.fuse_2 = nn.Sequential(nn.Conv2d(160, 256, 3, padding=1), nn.BatchNorm2d(256))
-        self.fuse_3 = nn.Sequential(nn.ConvTranspose2d(160, 256, 2, 2, 0, 0), nn.Conv2d(256, 256, 3, padding=1),
+        self.fuse_1 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels,
+                                              256, 3, 2, 1), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256))
+        self.fuse_2 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, padding=1), nn.BatchNorm2d(256))
+        self.fuse_3 = nn.Sequential(nn.ConvTranspose2d(self.base.config.fpn_channels, 256, 2, 2, 0, 0), nn.Conv2d(256, 256, 3, padding=1),
                                     nn.BatchNorm2d(256))
         self.feature_head = HeadNet(eba_config, self.in_planes)
 

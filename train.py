@@ -9,6 +9,8 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
+from itertools import cycle
+
 from reid_strong_baseline.data import make_data_loader
 from reid_strong_baseline.config.defaults import _C as cfg
 from reid_strong_baseline.engine.inference import create_supervised_evaluator
@@ -610,7 +612,7 @@ xbm_module=None, loss_fn=None):
     last_idx = len(loader) - 1
     num_updates = epoch * len(loader)
     iterator = iter(loader_reid)
-    for batch_idx, ((input, target), ((img, boxes), target_reid)) in enumerate(tqdm(zip(loader, loader_reid))):
+    for batch_idx, ((input, target), ((img, boxes), target_reid)) in enumerate(tqdm(zip(loader, cycle(loader_reid)))):
         try:
             # (img, boxes), target_reid = next(iterator)
             img = img.cuda()
