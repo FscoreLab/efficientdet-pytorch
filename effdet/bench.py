@@ -2,12 +2,16 @@
 
 Hacked together by Ross Wightman
 """
+from collections import Counter
 from functools import partial
 from typing import Callable, Optional, Dict, List, Tuple
 import einops
 import torch
 import torch.nn as nn
+from omegaconf import OmegaConf
+
 from .anchors import Anchors, AnchorLabeler, generate_detections
+from .efficientdet import HeadNet
 from .loss import DetectionLoss
 
 
@@ -234,6 +238,106 @@ class DetBenchTrain(nn.Module):
             )
         return output
 
+
+def weights_init_kaiming(m):
+    classname = m.__class__.__name__
+    if classname.find('Linear') != -1:
+        nn.init.kaiming_normal_(m.weight, a=0, mode='fan_out')
+        nn.init.constant_(m.bias, 0.0)
+    elif classname.find('Conv') != -1:
+        nn.init.kaiming_normal_(m.weight, a=0, mode='fan_in')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0.0)
+    elif classname.find('BatchNorm') != -1:
+        if m.affine:
+            nn.init.constant_(m.weight, 1.0)
+            nn.init.constant_(m.bias, 0.0)
+
+
+def weights_init_classifier(m):
+    classname = m.__class__.__name__
+    if classname.find('Linear') != -1:
+        nn.init.normal_(m.weight, std=0.001)
+        if m.bias:
+            nn.init.constant_(m.bias, 0.0)
+
+class ReidBench(nn.Module):
+    def __init__(self, model, num_classes, neck, neck_feat):
+
+        super(ReidBench, self).__init__()
+        self.base = model
+        self.gap = nn.AdaptiveMaxPool2d(1)
+        self.num_classes = num_classes
+        self.neck = neck
+        self.neck_feat = neck_feat
+        self.in_planes = 256
+        config = dict(self.base.config)
+        config["num_scales"] = 1
+        config["num_levels"] = 1
+        config["aspect_ratios"] = [(1.0, 1.0)]
+        config["fpn_channels"] = 256
+        eba_config = OmegaConf.create()
+        eba_config.update(config)
+        self.fuse_1 = nn.Sequential(nn.Conv2d(160, 256, 3, 2, 1), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256))
+        self.fuse_2 = nn.Sequential(nn.Conv2d(160, 256, 3, padding=1), nn.BatchNorm2d(256))
+        self.fuse_3 = nn.Sequential(nn.ConvTranspose2d(160, 256, 2, 2, 0, 0), nn.Conv2d(256, 256, 3, padding=1),
+                                    nn.BatchNorm2d(256))
+        self.feature_head = HeadNet(eba_config, self.in_planes)
+
+        if self.neck == 'no':
+            self.classifier = nn.Linear(self.in_planes, self.num_classes)
+            # self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)     # new add by luo
+            # self.classifier.apply(weights_init_classifier)  # new add by luo
+        elif self.neck == 'bnneck':
+            self.bottleneck = nn.BatchNorm1d(self.in_planes)
+            self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)
+            self.bottleneck.bias.requires_grad_(False)  # no shift
+
+            self.bottleneck.apply(weights_init_kaiming)
+            self.classifier.apply(weights_init_classifier)
+
+    def forward(self, x, target):
+        return self.base(x, target)
+
+    def reid_forward(self, x, target):
+        x, box = x
+        global_feat = self.base.model.backbone(x)
+        global_feat = self.base.model.fpn(global_feat)
+        global_feat = self.feature_head([nn.functional.relu(self.fuse_1(global_feat[1]) +
+                                                            self.fuse_2(global_feat[2]) +
+                                                            self.fuse_3(global_feat[3]))])[0]
+        center_x = (box[:, 2] + box[:, 0]) // 2
+        center_y = (box[:, 3] + box[:, 1]) // 2
+        global_feat = global_feat[torch.arange(0, global_feat.shape[0]).long(), :,
+                                 (center_y * global_feat.shape[-2] / x.shape[-2]).long(),
+                                 (center_x * global_feat.shape[-1] / x.shape[-1]).long()]
+
+        global_feat = global_feat.view(global_feat.shape[0], -1)
+        if self.neck == 'no':
+            feat = global_feat
+        elif self.neck == 'bnneck':
+            feat = self.bottleneck(global_feat)  # normalize for angular softmax
+
+        if self.training:
+            cls_score = self.classifier(feat)
+            return cls_score, nn.functional.normalize(global_feat), target  # global feature for triplet loss
+        else:
+            if self.neck_feat == 'after':
+                # print("Test with feature after BN")
+                return nn.functional.normalize(global_feat), target  # feat
+            else:
+                # print("Test with feature before BN")
+                return nn.functional.normalize(global_feat), target
+
+
+class ReidEvalBench(nn.Module):
+    def __init__(self, model):
+        super(ReidEvalBench, self).__init__()
+        self.base = model
+
+
+    def forward(self, *x):
+        return self.base.reid_forward(*x)
 
 def unwrap_bench(model):
     # Unwrap a model in support bench so that various other fns can access the weights and attribs of the
