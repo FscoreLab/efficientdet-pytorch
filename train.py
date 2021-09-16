@@ -9,6 +9,15 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
+from reid_strong_baseline.data import make_data_loader
+from reid_strong_baseline.config.defaults import _C as cfg
+from reid_strong_baseline.engine.inference import create_supervised_evaluator
+from reid_strong_baseline.layers import make_loss_with_center, make_loss
+from reid_strong_baseline.modeling import XBM
+from reid_strong_baseline.utils.reid_metric import R1_mAP
+from tqdm import tqdm
+
+from effdet.bench import ReidBench, ReidEvalBench
 from effdet.data.transforms import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 import os
 import argparse
@@ -205,7 +214,9 @@ parser.add_argument('--eval-metric', default='map', type=str, metavar='EVAL_METR
 parser.add_argument('--tta', type=int, default=0, metavar='N',
                     help='Test/inference time augmentation (oversampling) factor. 0=None (default: 0)')
 parser.add_argument("--local_rank", default=0, type=int)
-
+parser.add_argument('--reid_config', default='data/processed/Peta/configs/softmax_triplet_with_center.yml',
+                    type=str, metavar='PATH',
+                    help='path to output folder (default: none, current dir)')
 
 def _parse_args():
     # Do we have a config file to parse?
@@ -234,7 +245,7 @@ def main():
     args, args_text = _parse_args()
 
     project_name = "Pochta/VIDEOANAL_detection"
-    task_name = "crowd_human_efficientdet_d3_gmm_1"
+    task_name = "crowd_human_efficientdet_d3_gmm_reid_1"
     output_uri = (
         "s3://astralai-trains/videoanal/efficientdet"  # path for saving models (torch.save) with clearml hooks
     )
@@ -326,6 +337,13 @@ def main():
         assert not args.sync_bn, 'Cannot use SyncBatchNorm with torchscripted model. Use `--dist-bn reduce` instead of `--sync-bn`'
         model = torch.jit.script(model)
 
+    cfg.merge_from_file(args.reid_config)
+    loader_train, loader_eval, evaluator, loader_train_reid, loader_eval_reid, num_classes_reid, num_query = create_datasets_and_loaders(
+        args,
+        model_config,
+        reid_cfg=cfg)
+    loss_fn = make_loss(cfg, num_classes_reid)
+    model = ReidBench(model, num_classes_reid, cfg.MODEL.NECK, cfg.TEST.NECK_FEAT)
     optimizer = create_optimizer(args, model)
 
     amp_autocast = suppress  # do nothing
@@ -388,7 +406,7 @@ def main():
     if args.local_rank == 0:
         logging.info('Scheduled epochs: {}'.format(num_epochs))
 
-    loader_train, loader_eval, evaluator = create_datasets_and_loaders(args, model_config)
+    xbm = XBM()
 
     if model_config.num_classes < loader_train.dataset.parser.max_label:
         logging.error(
@@ -419,6 +437,9 @@ def main():
 
     best_map = -1.0
     writer = SummaryWriter(log_dir=output_dir)
+    reid_evaluator = create_supervised_evaluator(ReidEvalBench(model), metrics={
+        'r1_mAP': R1_mAP(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)},
+                                            device="cuda:0")
 
     try:
         for epoch in range(start_epoch, num_epochs):
@@ -427,9 +448,10 @@ def main():
 
             train_metrics = train_epoch(
                 writer,
-                epoch, model, loader_train, optimizer, args,
+                epoch, model, loader_train, loader_train_reid, optimizer, args,
                 lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
-                amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema)
+                amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, loss_fn=loss_fn,
+                xbm_module=xbm if epoch > -1 else None)
             writer.add_scalar("Loss/train", train_metrics['loss'], global_step=epoch)
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
@@ -448,6 +470,14 @@ def main():
 
             writer.add_scalar("Loss/val", eval_metrics['loss'], global_step=epoch)
             writer.add_scalar("mAP/val", eval_metrics['map'], global_step=epoch)
+
+            if epoch % 5 == 0:
+                reid_metrics = validate_reid(reid_evaluator, loader_eval_reid, epoch)
+                writer.add_scalar("mAP_reid/val", reid_metrics['mAP'], global_step=epoch)
+                writer.add_scalar("mAP_reid/rank-1", reid_metrics['r-1'], global_step=epoch)
+                writer.add_scalar("mAP_reid/rank-5", reid_metrics['r-5'], global_step=epoch)
+                writer.add_scalar("mAP_reid/rank-10", reid_metrics['r-10'], global_step=epoch)
+
 
             if (eval_metrics["map"] > best_map):
                 save_path = os.path.join(saver.checkpoint_dir, "best_model.pth.tar")
@@ -481,6 +511,7 @@ def create_datasets_and_loaders(
         transform_train_fn=None,
         transform_eval_fn=None,
         collate_fn=None,
+        reid_cfg=None
 ):
     """ Setup datasets, transforms, loaders, evaluator.
 
@@ -547,9 +578,11 @@ def create_datasets_and_loaders(
         collate_fn=collate_fn,
     )
 
+    train_loader_reid, val_loader_reid, num_query, num_classes = make_data_loader(reid_cfg)
+
     evaluator = create_evaluator(args.dataset, loader_eval.dataset, distributed=args.distributed, pred_yxyx=False)
 
-    return loader_train, loader_eval, evaluator
+    return loader_train, loader_eval, evaluator, train_loader_reid, val_loader_reid, num_classes, num_query
 
 
 def denorm_images(imgs):
@@ -560,8 +593,9 @@ def denorm_images(imgs):
 
 def train_epoch(
         writer,
-        epoch, model, loader, optimizer, args,
-        lr_scheduler=None, saver=None, output_dir='', amp_autocast=suppress, loss_scaler=None, model_ema=None):
+        epoch, model, loader, loader_reid, optimizer, args,
+        lr_scheduler=None, saver=None, output_dir='', amp_autocast=suppress, loss_scaler=None, model_ema=None,
+xbm_module=None, loss_fn=None):
 
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
@@ -572,9 +606,18 @@ def train_epoch(
     end = time.time()
     last_idx = len(loader) - 1
     num_updates = epoch * len(loader)
-    for batch_idx, (input, target) in enumerate(loader):
+    iterator = iter(loader_reid)
+    for batch_idx, ((input, target), ((img, boxes), target_reid)) in enumerate(tqdm(zip(loader, loader_reid))):
+        try:
+            # (img, boxes), target_reid = next(iterator)
+            img = img.cuda()
+            boxes = boxes.cuda()
+            target_reid = target_reid.cuda() if torch.cuda.device_count() >= 1 else target_reid
+        except StopIteration:
+            iterator = iter(loader_reid)
         if epoch % 5 == 0 and batch_idx == 0:
             writer.add_images("samples/train", denorm_images(input), global_step=epoch)
+            writer.add_images("samples/train_reid", denorm_images(img), global_step=epoch)
             
         last_batch = batch_idx == last_idx
         data_time_m.update(time.time() - end)
@@ -584,7 +627,17 @@ def train_epoch(
 
         with amp_autocast():
             output = model(input, target)
-        loss = output['loss']
+
+        score, feat, target_reid = model.reid_forward((img, boxes), target_reid)
+        if xbm_module:
+            xbm_module.enqueue_dequeue(feat.detach(), target_reid.detach())
+        loss = loss_fn(score, feat, target_reid, feat, target_reid)
+        if xbm_module:
+            xbm_feats, xbm_targets = xbm_module.get()
+            xbm_loss = loss_fn(score, feat, target_reid, xbm_feats, xbm_targets)
+            loss += xbm_loss
+
+        loss += output['loss']
 
         if not args.distributed:
             losses_m.update(loss.item(), input.size(0))
@@ -648,7 +701,8 @@ def train_epoch(
             lr_scheduler.step_update(num_updates=num_updates, metric=losses_m.avg)
 
         end = time.time()
-        # break
+        # if batch_idx == 100:
+        #     break
         # end for
 
     if hasattr(optimizer, 'sync_lookahead'):
@@ -705,6 +759,8 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
                     'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})  '
                     'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '.format(
                         log_name, batch_idx, last_idx, batch_time=batch_time_m, loss=losses_m))
+            if batch_idx == 100:
+                break
 
     metrics = OrderedDict([('loss', losses_m.avg)])
     if evaluator is not None:
@@ -712,6 +768,18 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
 
     return metrics
 
+
+def validate_reid(evaluator, val_loader, epoch):
+    evaluator.run(val_loader)
+    metrics = OrderedDict()
+    cmc, mAP = evaluator.state.metrics['r1_mAP']
+    metrics["mAP"] = mAP
+    logging.info("Validation Results - Epoch: {}".format(epoch))
+    logging.info("mAP: {:.1%}".format(mAP))
+    for r in [1, 5, 10]:
+        logging.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+        metrics[f"r-{r}"] = cmc[r - 1]
+    return metrics
 
 if __name__ == '__main__':
     main()
