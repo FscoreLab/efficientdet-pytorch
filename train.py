@@ -9,6 +9,8 @@ NVIDIA CUDA specific speedups adopted from NVIDIA Apex examples
 
 Hacked together by Ross Wightman (https://github.com/rwightman)
 """
+# import warnings
+# warnings.simplefilter(action='error', category=FutureWarning)
 from itertools import cycle
 
 from reid_strong_baseline.data import make_data_loader
@@ -219,9 +221,15 @@ parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument('--reid_config', default='data/processed/Peta/configs/softmax_triplet_with_center.yml',
                     type=str, metavar='PATH',
                     help='path to reid config')
-parser.add_argument('--xbm_epoch', type=int, default=1, metavar='S',
+parser.add_argument('--xbm_epoch', type=int, default=1,
                     help=' epoch when cross batch memory start')
 
+parser.add_argument('--reid_loss_weight', type=float, default=0.1,
+                    help='weight for reid loss on batch')
+parser.add_argument('--reid_xbm_loss_weight', type=float, default=0.1,
+                    help='weight for reid loss on cross batch memory')
+parser.add_argument('--xbm_size', type=int, default=200,
+                    help='size of cross batch memory buffer')
 def _parse_args():
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
@@ -411,7 +419,7 @@ def main():
     if args.local_rank == 0:
         logging.info('Scheduled epochs: {}'.format(num_epochs))
 
-    xbm = XBM()
+    xbm = XBM(args.xbm_size)
 
     if model_config.num_classes < loader_train.dataset.parser.max_label:
         logging.error(
@@ -476,12 +484,11 @@ def main():
             writer.add_scalar("Loss/val", eval_metrics['loss'], global_step=epoch)
             writer.add_scalar("mAP/val", eval_metrics['map'], global_step=epoch)
 
-            if epoch % 5 == 0:
-                reid_metrics = validate_reid(reid_evaluator, loader_eval_reid, epoch)
-                writer.add_scalar("mAP_reid/val", reid_metrics['mAP'], global_step=epoch)
-                writer.add_scalar("mAP_reid/rank-1", reid_metrics['r-1'], global_step=epoch)
-                writer.add_scalar("mAP_reid/rank-5", reid_metrics['r-5'], global_step=epoch)
-                writer.add_scalar("mAP_reid/rank-10", reid_metrics['r-10'], global_step=epoch)
+            reid_metrics = validate_reid(reid_evaluator, loader_eval_reid, epoch, writer)
+            writer.add_scalar("reid/map", reid_metrics['mAP'], global_step=epoch)
+            writer.add_scalar("reid/rank-1", reid_metrics['r-1'], global_step=epoch)
+            writer.add_scalar("reid/rank-5", reid_metrics['r-5'], global_step=epoch)
+            writer.add_scalar("reid/rank-10", reid_metrics['r-10'], global_step=epoch)
 
 
             if (eval_metrics["map"] > best_map):
@@ -605,6 +612,9 @@ xbm_module=None, loss_fn=None):
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     losses_m = AverageMeter()
+    losses_det_m = AverageMeter()
+    losses_reid_m = AverageMeter()
+    losses_reid_xbm_m = AverageMeter()
 
     model.train()
 
@@ -636,16 +646,22 @@ xbm_module=None, loss_fn=None):
         score, feat, target_reid = model.reid_forward((img, boxes), target_reid)
         if xbm_module:
             xbm_module.enqueue_dequeue(feat.detach(), target_reid.detach())
-        loss = loss_fn(score, feat, target_reid, feat, target_reid)
+        loss_reid = loss_fn(score, feat, target_reid, feat, target_reid)
+        loss_det = output['loss']
+        loss = loss_det + args.reid_loss_weight * loss_reid
+        loss_xbm = None
         if xbm_module:
             xbm_feats, xbm_targets = xbm_module.get()
-            xbm_loss = loss_fn(score, feat, target_reid, xbm_feats, xbm_targets)
-            loss += xbm_loss
-
-        loss += output['loss']
+            loss_xbm = loss_fn(score, feat, target_reid, xbm_feats, xbm_targets)
+            loss += args.reid_xbm_loss_weight * loss_xbm
 
         if not args.distributed:
             losses_m.update(loss.item(), input.size(0))
+            losses_det_m.update(loss_det.item(), input.size(0))
+            losses_reid_m.update(loss_reid.item(), img.size(0))
+            if loss_xbm is not None:
+                losses_reid_xbm_m.update(loss_xbm.item(), img.size(0))
+
 
         optimizer.zero_grad()
         if loss_scaler is not None:
@@ -690,6 +706,10 @@ xbm_module=None, loss_fn=None):
                         lr=lr,
                         data_time=data_time_m))
                 writer.add_scalar("Loss_step/train", losses_m.val, global_step=(epoch * last_idx + batch_idx))
+                writer.add_scalar("Loss_step/det", losses_det_m.val, global_step=(epoch * last_idx + batch_idx))
+                writer.add_scalar("Loss_step/reid", losses_reid_m.val, global_step=(epoch * last_idx + batch_idx))
+                if loss_xbm is not None:
+                    writer.add_scalar("Loss_step/reid_xbm", losses_reid_xbm_m.val, global_step=(epoch * last_idx + batch_idx))
 
                 if args.save_images and output_dir:
                     torchvision.utils.save_image(
@@ -772,7 +792,12 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
     return metrics
 
 
-def validate_reid(evaluator, val_loader, epoch):
+def validate_reid(evaluator, val_loader, epoch, writer):
+    if epoch % 5 == 0:
+        img, _ = next(iter(val_loader))
+        images = denorm_images(img) * 255
+        images = images.to(torch.uint8).cpu()
+        writer.add_images("samples/valid_reid", images, global_step=epoch)
     evaluator.run(val_loader)
     metrics = OrderedDict()
     cmc, mAP = evaluator.state.metrics['r1_mAP']
