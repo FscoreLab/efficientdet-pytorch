@@ -761,8 +761,7 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
                     'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})  '
                     'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '.format(
                         log_name, batch_idx, last_idx, batch_time=batch_time_m, loss=losses_m))
-            if batch_idx == 100:
-                break
+
 
     metrics = OrderedDict([('loss', losses_m.avg)])
     if evaluator is not None:
