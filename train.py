@@ -216,7 +216,9 @@ parser.add_argument('--tta', type=int, default=0, metavar='N',
 parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument('--reid_config', default='data/processed/Peta/configs/softmax_triplet_with_center.yml',
                     type=str, metavar='PATH',
-                    help='path to output folder (default: none, current dir)')
+                    help='path to reid config')
+parser.add_argument('--xbm_epoch', type=int, default=1, metavar='S',
+                    help=' epoch when cross batch memory start')
 
 def _parse_args():
     # Do we have a config file to parse?
@@ -244,12 +246,13 @@ def main():
     setup_default_logging()
     args, args_text = _parse_args()
 
-    # project_name = "Pochta/VIDEOANAL_detection"
-    # task_name = "crowd_human_efficientdet_d3_gmm_reid_1"
-    # output_uri = (
-    #     "s3://astralai-trains/videoanal/efficientdet"  # path for saving models (torch.save) with clearml hooks
-    # )
-    # Task.init(project_name=project_name, task_name=task_name, output_uri=output_uri)
+
+    project_name = "Pochta/VIDEOANAL_detection"
+    task_name = "crowd_human_efficientdet_d3_gmm_reid_1"
+    output_uri = (
+        "s3://astralai-trains/videoanal/efficientdet"  # path for saving models (torch.save) with clearml hooks
+    )
+    Task.init(project_name=project_name, task_name=task_name, output_uri=output_uri)
 
     args.pretrained_backbone = not args.no_pretrained_backbone
     args.prefetcher = not args.no_prefetcher
@@ -451,7 +454,7 @@ def main():
                 epoch, model, loader_train, loader_train_reid, optimizer, args,
                 lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
                 amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, loss_fn=loss_fn,
-                xbm_module=xbm if epoch > -1 else None)
+                xbm_module=xbm if epoch >= args.xbm_epoch else None)
             writer.add_scalar("Loss/train", train_metrics['loss'], global_step=epoch)
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
@@ -758,6 +761,8 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
                     'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})  '
                     'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '.format(
                         log_name, batch_idx, last_idx, batch_time=batch_time_m, loss=losses_m))
+            if batch_idx == 100:
+                break
 
     metrics = OrderedDict([('loss', losses_m.avg)])
     if evaluator is not None:
