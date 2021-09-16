@@ -794,8 +794,8 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
 
 def validate_reid(evaluator, val_loader, epoch, writer):
     if epoch % 5 == 0:
-        img, _ = next(iter(val_loader))
-        images = denorm_images(img) * 255
+        img, _, _ = next(iter(val_loader))
+        images = denorm_images(img[0].cuda()) * 255
         images = images.to(torch.uint8).cpu()
         writer.add_images("samples/valid_reid", images, global_step=epoch)
     evaluator.run(val_loader)
