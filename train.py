@@ -319,7 +319,7 @@ def main():
             num_classes=args.num_classes,
             pretrained=args.pretrained,
             pretrained_backbone=args.pretrained_backbone,
-            redundant_bias=args.redundant_bias,
+            redundant_bias=False,
             label_smoothing=args.smoothing,
             legacy_focal=args.legacy_focal,
             jit_loss=args.jit_loss,
@@ -461,7 +461,6 @@ def main():
         for epoch in range(start_epoch, num_epochs):
             if args.distributed:
                 loader_train.sampler.set_epoch(epoch)
-
             train_metrics = train_epoch(
                 writer,
                 epoch, model, loader_train, loader_train_reid, optimizer, args,
@@ -490,10 +489,11 @@ def main():
             else:
                 eval_metrics = validate(writer, epoch, model, loader_eval, args, evaluator)
 
-            writer.add_scalar("Loss/val", eval_metrics['loss'], global_step=epoch)
+            writer.add_scalar("Loss/val-det", eval_metrics['loss'], global_step=epoch)
             writer.add_scalar("mAP/val", eval_metrics['map'], global_step=epoch)
 
             reid_metrics = validate_reid(reid_evaluator, loader_eval_reid, epoch, writer)
+            writer.add_scalar("Loss/val-reid", reid_metrics['loss'], global_step=epoch)
             writer.add_scalar("reid/map", reid_metrics['mAP'], global_step=epoch)
             writer.add_scalar("reid/rank-1", reid_metrics['r-1'], global_step=epoch)
             writer.add_scalar("reid/rank-5", reid_metrics['r-5'], global_step=epoch)
@@ -798,6 +798,7 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
                     'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})  '
                     'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '.format(
                         log_name, batch_idx, last_idx, batch_time=batch_time_m, loss=losses_m))
+            # break
 
 
     metrics = OrderedDict([('loss', losses_m.avg)])
@@ -815,10 +816,12 @@ def validate_reid(evaluator, val_loader, epoch, writer):
         writer.add_images("samples/valid_reid", images, global_step=epoch)
     evaluator.run(val_loader)
     metrics = OrderedDict()
-    cmc, mAP = evaluator.state.metrics['r1_mAP']
+    cmc, mAP, loss = evaluator.state.metrics['r1_mAP']
     metrics["mAP"] = mAP
+    metrics["loss"] = loss
     logging.info("Validation Results - Epoch: {}".format(epoch))
     logging.info("mAP: {:.1%}".format(mAP))
+    logging.info("loss: {:.5%}".format(loss))
     for r in [1, 5, 10]:
         logging.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
         metrics[f"r-{r}"] = cmc[r - 1]
