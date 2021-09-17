@@ -307,9 +307,10 @@ class ReidBench(nn.Module):
         global_feat = self.feature_head([nn.functional.relu(self.fuse_1(global_feat[1]) +
                                                             self.fuse_2(global_feat[2]) +
                                                             self.fuse_3(global_feat[3]))])[0]
-        center_x = (box[:, 2] + box[:, 0]) // 2
-        center_y = (box[:, 3] + box[:, 1]) // 2
-        global_feat = global_feat[torch.arange(0, global_feat.shape[0]).long(), :,
+        center_x = ((box[:, :, 2] + box[:, :, 0]) // 2).flatten()
+        center_y = ((box[:, :, 3] + box[:, :, 1]) // 2).flatten()
+        idx = torch.arange(0, global_feat.shape[0]).long().expand((4, 5)).T.flatten()
+        global_feat = global_feat[idx, :,
                                  (center_y * global_feat.shape[-2] / x.shape[-2]).long(),
                                  (center_x * global_feat.shape[-1] / x.shape[-1]).long()]
 
@@ -321,7 +322,7 @@ class ReidBench(nn.Module):
 
         if self.training:
             cls_score = self.classifier(feat)
-            return cls_score, nn.functional.normalize(global_feat), target  # global feature for triplet loss
+            return cls_score, nn.functional.normalize(global_feat), target.flatten()  # global feature for triplet loss
         else:
             if self.neck_feat == 'after':
                 # print("Test with feature after BN")

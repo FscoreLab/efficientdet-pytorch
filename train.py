@@ -16,7 +16,7 @@ from itertools import cycle
 from reid_strong_baseline.data import make_data_loader
 from reid_strong_baseline.config.defaults import _C as cfg
 from reid_strong_baseline.engine.inference import create_supervised_evaluator
-from reid_strong_baseline.layers import make_loss_with_center, make_loss
+from reid_strong_baseline.layers import make_loss_with_center, make_loss, TripletLoss, CrossEntropyLabelSmooth
 from reid_strong_baseline.modeling import XBM
 from reid_strong_baseline.utils.reid_metric import R1_mAP
 from tqdm import tqdm
@@ -221,13 +221,15 @@ parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument('--reid_config', default='data/processed/Peta/configs/softmax_triplet_with_center.yml',
                     type=str, metavar='PATH',
                     help='path to reid config')
-parser.add_argument('--xbm_epoch', type=int, default=1,
+parser.add_argument('--xbm_epoch', type=int, default=0,
                     help=' epoch when cross batch memory start')
 
-parser.add_argument('--reid_loss_weight', type=float, default=0.1,
+parser.add_argument('--reid_loss_weight', type=float, default=1,
                     help='weight for reid loss on batch')
-parser.add_argument('--reid_xbm_loss_weight', type=float, default=0.1,
+parser.add_argument('--reid_xbm_loss_weight', type=float, default=1,
                     help='weight for reid loss on cross batch memory')
+parser.add_argument('--class_loss_weight', type=float, default=0.1,
+                    help='weight for cross entropy loss')
 parser.add_argument('--xbm_size', type=int, default=200,
                     help='size of cross batch memory buffer')
 def _parse_args():
@@ -355,7 +357,8 @@ def main():
         args,
         model_config,
         reid_cfg=cfg)
-    loss_fn = make_loss(cfg, num_classes_reid)
+    triplet_loss = TripletLoss(cfg.SOLVER.RANGE_MARGIN)
+    classification_loss = CrossEntropyLabelSmooth(num_classes_reid)
     model = ReidBench(model, num_classes_reid, cfg.MODEL.NECK, cfg.TEST.NECK_FEAT)
     optimizer = create_optimizer(args, model)
 
@@ -463,9 +466,15 @@ def main():
                 writer,
                 epoch, model, loader_train, loader_train_reid, optimizer, args,
                 lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
-                amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, loss_fn=loss_fn,
+                amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema,
+                triplet_loss=triplet_loss,
+                classification_loss=classification_loss,
                 xbm_module=xbm if epoch >= args.xbm_epoch else None)
             writer.add_scalar("Loss/train", train_metrics['loss'], global_step=epoch)
+            writer.add_scalar("Loss/train-reid", train_metrics['loss-reid'], global_step=epoch)
+            writer.add_scalar("Loss/train-det", train_metrics['loss-det'], global_step=epoch)
+            writer.add_scalar("Loss/train-class", train_metrics['loss-class'], global_step=epoch)
+            writer.add_scalar("Loss/train-xbm", train_metrics['loss-xbm'], global_step=epoch)
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                 if args.local_rank == 0:
@@ -607,13 +616,14 @@ def train_epoch(
         writer,
         epoch, model, loader, loader_reid, optimizer, args,
         lr_scheduler=None, saver=None, output_dir='', amp_autocast=suppress, loss_scaler=None, model_ema=None,
-xbm_module=None, loss_fn=None):
+xbm_module=None, triplet_loss=None, classification_loss=None):
 
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     losses_m = AverageMeter()
     losses_det_m = AverageMeter()
     losses_reid_m = AverageMeter()
+    losses_class_m = AverageMeter()
     losses_reid_xbm_m = AverageMeter()
 
     model.train()
@@ -646,19 +656,21 @@ xbm_module=None, loss_fn=None):
         score, feat, target_reid = model.reid_forward((img, boxes), target_reid)
         if xbm_module:
             xbm_module.enqueue_dequeue(feat.detach(), target_reid.detach())
-        loss_reid = loss_fn(score, feat, target_reid, feat, target_reid)
+        loss_triplet = triplet_loss(feat, target_reid, feat, target_reid)[0]
+        loss_class = classification_loss(score, target_reid)
         loss_det = output['loss']
-        loss = loss_det + args.reid_loss_weight * loss_reid
+        loss = loss_det + args.reid_loss_weight * loss_triplet + args.class_loss_weight * loss_class
         loss_xbm = None
         if xbm_module:
             xbm_feats, xbm_targets = xbm_module.get()
-            loss_xbm = loss_fn(score, feat, target_reid, xbm_feats, xbm_targets)
+            loss_xbm = triplet_loss(feat, target_reid, xbm_feats, xbm_targets)[0]
             loss += args.reid_xbm_loss_weight * loss_xbm
 
         if not args.distributed:
             losses_m.update(loss.item(), input.size(0))
             losses_det_m.update(loss_det.item(), input.size(0))
-            losses_reid_m.update(loss_reid.item(), img.size(0))
+            losses_reid_m.update(loss_triplet.item(), img.size(0))
+            losses_class_m.update(loss_class.item(), img.size(0))
             if loss_xbm is not None:
                 losses_reid_xbm_m.update(loss_xbm.item(), img.size(0))
 
@@ -708,6 +720,7 @@ xbm_module=None, loss_fn=None):
                 writer.add_scalar("Loss_step/train", losses_m.val, global_step=(epoch * last_idx + batch_idx))
                 writer.add_scalar("Loss_step/det", losses_det_m.val, global_step=(epoch * last_idx + batch_idx))
                 writer.add_scalar("Loss_step/reid", losses_reid_m.val, global_step=(epoch * last_idx + batch_idx))
+                writer.add_scalar("Loss_step/class", losses_class_m.val, global_step=(epoch * last_idx + batch_idx))
                 if loss_xbm is not None:
                     writer.add_scalar("Loss_step/reid_xbm", losses_reid_xbm_m.val, global_step=(epoch * last_idx + batch_idx))
 
@@ -732,7 +745,9 @@ xbm_module=None, loss_fn=None):
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
 
-    return OrderedDict([('loss', losses_m.avg)])
+    return OrderedDict([('loss', losses_m.avg), ("loss-reid", losses_reid_m.avg),
+                        ("loss-class", losses_class_m.avg), ("loss-det", losses_det_m.avg),
+                        ("loss-xbm", losses_reid_xbm_m.avg)])
 
 
 def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
