@@ -309,7 +309,7 @@ class ReidBench(nn.Module):
                                                             self.fuse_3(global_feat[3]))])[0]
         center_x = ((box[..., 2] + box[..., 0]) // 2).flatten()
         center_y = ((box[..., 3] + box[..., 1]) // 2).flatten()
-        idx = torch.arange(0, global_feat.shape[0]).long().expand((box.shape[-2], global_feat.shape[0])).T.flatten()
+        idx = torch.arange(0, global_feat.shape[0]).long().expand((box.shape[-2] if len(box.shape) == 3 else 1, global_feat.shape[0])).T.flatten()
         global_feat = global_feat[idx, :,
                                  (center_y * global_feat.shape[-2] / x.shape[-2]).long(),
                                  (center_x * global_feat.shape[-1] / x.shape[-1]).long()]
