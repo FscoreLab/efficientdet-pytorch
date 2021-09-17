@@ -632,14 +632,18 @@ xbm_module=None, triplet_loss=None, classification_loss=None):
     last_idx = len(loader) - 1
     num_updates = epoch * len(loader)
     iterator = iter(loader_reid)
-    for batch_idx, ((input, target), ((img, boxes), target_reid)) in enumerate(zip(loader, cycle(loader_reid))):
+    for batch_idx, (input, target) in enumerate(loader):
         try:
-            # (img, boxes), target_reid = next(iterator)
+            (img, boxes), target_reid = next(iterator)
             img = img.cuda()
             boxes = boxes.cuda()
             target_reid = target_reid.cuda() if torch.cuda.device_count() >= 1 else target_reid
         except StopIteration:
             iterator = iter(loader_reid)
+            (img, boxes), target_reid = next(iterator)
+            img = img.cuda()
+            boxes = boxes.cuda()
+            target_reid = target_reid.cuda() if torch.cuda.device_count() >= 1 else target_reid
         if epoch % 5 == 0 and batch_idx == 0:
             writer.add_images("samples/train", denorm_images(input), global_step=epoch)
             writer.add_images("samples/train_reid", denorm_images(img), global_step=epoch)
