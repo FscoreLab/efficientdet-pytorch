@@ -322,14 +322,14 @@ class ReidBench(nn.Module):
 
         if self.training:
             cls_score = self.classifier(feat)
-            return cls_score, nn.functional.normalize(global_feat), target.flatten()  # global feature for triplet loss
+            return cls_score, global_feat, target.flatten()  # global feature for triplet loss
         else:
             if self.neck_feat == 'after':
                 # print("Test with feature after BN")
-                return nn.functional.normalize(global_feat), target  # feat
+                return global_feat, target  # feat
             else:
                 # print("Test with feature before BN")
-                return nn.functional.normalize(global_feat), target
+                return global_feat, target
 
 
 class ReidEvalBench(nn.Module):
