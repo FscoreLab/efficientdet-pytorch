@@ -359,7 +359,8 @@ def main():
         args,
         model_config,
         reid_cfg=cfg)
-    triplet_loss = TripletLoss(cfg.SOLVER.RANGE_MARGIN)
+    margin = cfg.SOLVER.RANGE_MARGIN
+    triplet_loss = TripletLoss(margin)
     classification_loss = CrossEntropyLabelSmooth(num_classes_reid)
     model = ReidBench(model, num_classes_reid, cfg.MODEL.NECK, cfg.TEST.NECK_FEAT, args.reid_feature_dim)
     optimizer = create_optimizer(args, model)
@@ -477,6 +478,11 @@ def main():
             writer.add_scalar("Loss/train-det", train_metrics['loss-det'], global_step=epoch)
             writer.add_scalar("Loss/train-class", train_metrics['loss-class'], global_step=epoch)
             writer.add_scalar("Loss/train-xbm", train_metrics['loss-xbm'], global_step=epoch)
+            if train_metrics["loss-reid"] < 0.01:
+                margin += 0.5
+                triplet_loss = TripletLoss(margin)
+
+
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                 if args.local_rank == 0:
