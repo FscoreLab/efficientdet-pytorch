@@ -628,7 +628,8 @@ xbm_module=None, triplet_loss=None, classification_loss=None):
     losses_reid_xbm_m = AverageMeter()
 
     model.train()
-    _freeze_bn(model.base)
+    _freeze_bn(model.base.model.backbone)
+    _freeze_bn(model.base.model.fpn)
 
     end = time.time()
     last_idx = len(loader) - 1
