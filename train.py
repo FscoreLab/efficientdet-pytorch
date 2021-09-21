@@ -232,6 +232,8 @@ parser.add_argument('--class_loss_weight', type=float, default=0.1,
                     help='weight for cross entropy loss')
 parser.add_argument('--xbm_size', type=int, default=200,
                     help='size of cross batch memory buffer')
+parser.add_argument('--reid_feature_dim', type=int, default=2048,
+                    help='dimension of reid features ')
 def _parse_args():
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
@@ -359,7 +361,7 @@ def main():
         reid_cfg=cfg)
     triplet_loss = TripletLoss(cfg.SOLVER.RANGE_MARGIN)
     classification_loss = CrossEntropyLabelSmooth(num_classes_reid)
-    model = ReidBench(model, num_classes_reid, cfg.MODEL.NECK, cfg.TEST.NECK_FEAT)
+    model = ReidBench(model, num_classes_reid, cfg.MODEL.NECK, cfg.TEST.NECK_FEAT, args.features_dim)
     optimizer = create_optimizer(args, model)
 
     amp_autocast = suppress  # do nothing
@@ -422,7 +424,7 @@ def main():
     if args.local_rank == 0:
         logging.info('Scheduled epochs: {}'.format(num_epochs))
 
-    xbm = XBM(args.xbm_size)
+    xbm = XBM(args.xbm_size, dim=args.reid_feature_dim)
 
     if model_config.num_classes < loader_train.dataset.parser.max_label:
         logging.error(

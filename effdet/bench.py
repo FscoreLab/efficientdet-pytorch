@@ -262,7 +262,7 @@ def weights_init_classifier(m):
             nn.init.constant_(m.bias, 0.0)
 
 class ReidBench(nn.Module):
-    def __init__(self, model, num_classes, neck, neck_feat):
+    def __init__(self, model, num_classes, neck, neck_feat, features_dim):
 
         super(ReidBench, self).__init__()
         self.base = model
@@ -270,7 +270,7 @@ class ReidBench(nn.Module):
         self.num_classes = num_classes
         self.neck = neck
         self.neck_feat = neck_feat
-        self.in_planes = 256
+        self.in_planes = features_dim
         config = dict(self.base.config)
         config["num_scales"] = 1
         config["num_levels"] = 1
