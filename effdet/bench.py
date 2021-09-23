@@ -9,6 +9,7 @@ import einops
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
+from torchvision.ops import roi_align
 
 from .anchors import Anchors, AnchorLabeler, generate_detections
 from .efficientdet import HeadNet
@@ -275,7 +276,7 @@ class ReidBench(nn.Module):
         config["num_scales"] = 1
         config["num_levels"] = 1
         config["aspect_ratios"] = [(1.0, 1.0)]
-        config["fpn_channels"] = 512
+        config["fpn_channels"] = 1280
         eba_config = OmegaConf.create()
         eba_config.update(config)
         self.fuse_backbone_1 = nn.Sequential(nn.Conv2d(384, 256, 3, 1, 1), nn.BatchNorm2d(256))
@@ -291,10 +292,10 @@ class ReidBench(nn.Module):
         self.fuse_1_3 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels,
                                                 256, 3, 1, 1), nn.BatchNorm2d(256))
 
-        self.fuse_1 = nn.Sequential(nn.Conv2d(256,
+        self.fuse_1 = nn.Sequential(nn.Conv2d(512,
                                               256, 3, 2, 1), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256))
         self.fuse_2 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, padding=1), nn.BatchNorm2d(256))
-        self.fuse_3 = nn.Sequential(nn.ConvTranspose2d(256, 256, 2, 2, 0, 0), nn.Conv2d(256, 256, 3, padding=1),
+        self.fuse_3 = nn.Sequential(nn.ConvTranspose2d(512, 256, 2, 2, 0, 0), nn.Conv2d(256, 256, 3, padding=1),
                                     nn.BatchNorm2d(256))
         self.feature_head = HeadNet(eba_config, self.in_planes)
 
@@ -316,23 +317,32 @@ class ReidBench(nn.Module):
     def reid_forward(self, x, target):
         x, box = x
         encoder_features = self.base.model.backbone(x)
-        backbone_mask = nn.functional.relu(self.fuse_backbone_1(encoder_features[-1]) +
-                                            self.fuse_backbone_2(encoder_features[-2]))
+        backbone_mask = torch.cat((
+                self.fuse_backbone_1(encoder_features[-1]),
+                self.fuse_backbone_2(encoder_features[-2])), dim=1)
         global_feat = self.base.model.fpn(encoder_features)
-        m1 = nn.functional.relu(self.fuse_1_1(global_feat[0]) +
-                               self.fuse_1_2(global_feat[1]))
-        m2 = nn.functional.relu(self.fuse_1_3(global_feat[3]) +
-                               self.fuse_1_4(global_feat[4]))
-        global_feat = self.feature_head([torch.cat((
-            nn.functional.relu(self.fuse_1(m1) + self.fuse_2(global_feat[2]) + self.fuse_3(m2)),
-                               backbone_mask), dim=1)])[0]
+        m1 = nn.functional.relu(
+            torch.cat(
+                (
+                    self.fuse_1_1(global_feat[0]),
+                    self.fuse_1_2(global_feat[1])
+                ), dim=1
+            ))
+        m2 = nn.functional.relu(torch.cat((self.fuse_1_3(global_feat[3]),
+                                           self.fuse_1_4(global_feat[4])), dim=1))
+        global_feat = self.feature_head([nn.functional.relu(torch.cat((
+            self.fuse_1(m1), self.fuse_2(global_feat[2]), self.fuse_3(m2),
+                               backbone_mask), dim=1))])[0]
 
-        center_x = ((box[..., 3] + box[..., 1]) // 2).flatten()
-        center_y = ((box[..., 4] + box[..., 2]) // 2).flatten()
-        idx = box[..., 0].flatten()
-        global_feat = global_feat[idx, :,
-                                 (center_y * global_feat.shape[-2] / x.shape[-2]).long(),
-                                 (center_x * global_feat.shape[-1] / x.shape[-1]).long()]
+        # center_x = ((box[..., 3] + box[..., 1]) // 2).flatten()
+        # center_y = ((box[..., 4] + box[..., 2]) // 2).flatten()
+        # idx = box[..., 0].flatten()
+        # global_feat = global_feat[idx, :,
+        #                          (center_y * global_feat.shape[-2] / x.shape[-2]).long(),
+        #                          (center_x * global_feat.shape[-1] / x.shape[-1]).long()]
+
+        global_feat = roi_align(global_feat, box[0].float(), output_size=(1, 1),
+                                spatial_scale=global_feat.shape[-2] / x.shape[-2], aligned=True)
 
         global_feat = global_feat.view(global_feat.shape[0], -1)
         if self.neck == 'no':
