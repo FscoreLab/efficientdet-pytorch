@@ -362,7 +362,7 @@ def main():
     margin = cfg.SOLVER.RANGE_MARGIN
     triplet_loss = TripletLoss(margin)
     classification_loss = CrossEntropyLabelSmooth(num_classes_reid)
-    model = ReidBench(model, num_classes_reid, cfg.MODEL.NECK, cfg.TEST.NECK_FEAT, args.reid_feature_dim)
+    model = ReidBench(model, num_classes_reid, cfg.MODEL.NECK, cfg.TEST.NECK_FEAT, args.reid_feature_dim).cuda()
     optimizer = create_optimizer(args, model)
 
     amp_autocast = suppress  # do nothing
@@ -464,7 +464,7 @@ def main():
         for epoch in range(start_epoch, num_epochs):
             if args.distributed:
                 loader_train.sampler.set_epoch(epoch)
-            # reid_metrics = validate_reid(reid_evaluator, loader_eval_reid, epoch, writer)
+            reid_metrics = validate_reid(reid_evaluator, loader_eval_reid, epoch, writer)
             train_metrics = train_epoch(
                 writer,
                 epoch, model, loader_train, loader_train_reid, optimizer, args,
@@ -670,7 +670,7 @@ xbm_module=None, triplet_loss=None, classification_loss=None):
         score, feat, target_reid = model.reid_forward((img, boxes), target_reid)
         if xbm_module:
             xbm_module.enqueue_dequeue(feat.detach(), target_reid.detach())
-        loss_triplet = triplet_loss(feat, target_reid, feat, target_reid)[0]
+        loss_triplet = triplet_loss(feat, target_reid, feat, target_reid, sasat=True)[0]
         loss_class = classification_loss(score, target_reid)
         loss_det = output['loss']
         loss = loss_det + args.reid_loss_weight * loss_triplet + args.class_loss_weight * loss_class
