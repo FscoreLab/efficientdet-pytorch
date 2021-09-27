@@ -337,7 +337,7 @@ class ReidBench(nn.Module):
             self.fuse_1(m1), self.fuse_2(global_feat[2]), self.fuse_3(m2),
             backbone_mask), dim=1))])[0]
 
-        global_feat = roi_align(global_feat, boxes.float(), output_size=(1, 1),
+        global_feat = roi_align(global_feat, boxes, output_size=(1, 1),
                                 spatial_scale=global_feat.shape[-2] / src_shape[-2], aligned=True)
 
         global_feat = global_feat.view(global_feat.shape[0], -1)
