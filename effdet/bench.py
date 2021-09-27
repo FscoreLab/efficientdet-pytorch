@@ -314,6 +314,63 @@ class ReidBench(nn.Module):
     def forward(self, x, target):
         return self.base(x, target)
 
+    def common_forward(self, x):
+        encoder_features = self.base.model.backbone(x)
+        backbone_mask = torch.cat((
+            self.fuse_backbone_1(encoder_features[-1]),
+            self.fuse_backbone_2(encoder_features[-2])), dim=1)
+        fpn_output = self.base.model.fpn(encoder_features)
+        return fpn_output, backbone_mask
+
+    def reid_on_features(self, fpn_output, backbone_mask, boxes, src_shape):
+        global_feat = fpn_output
+        m1 = nn.functional.relu(
+            torch.cat(
+                (
+                    self.fuse_1_1(global_feat[0]),
+                    self.fuse_1_2(global_feat[1])
+                ), dim=1
+            ))
+        m2 = nn.functional.relu(torch.cat((self.fuse_1_3(global_feat[3]),
+                                           self.fuse_1_4(global_feat[4])), dim=1))
+        global_feat = self.feature_head([nn.functional.relu(torch.cat((
+            self.fuse_1(m1), self.fuse_2(global_feat[2]), self.fuse_3(m2),
+            backbone_mask), dim=1))])[0]
+
+        global_feat = roi_align(global_feat, boxes.float(), output_size=(1, 1),
+                                spatial_scale=global_feat.shape[-2] / src_shape[-2], aligned=True)
+
+        global_feat = global_feat.view(global_feat.shape[0], -1)
+        if self.neck == 'no':
+            feat = global_feat
+        elif self.neck == 'bnneck':
+            feat = self.bottleneck(global_feat)  # normalize for angular softmax
+
+        if self.neck_feat == 'after':
+            # print("Test with feature after BN")
+            return feat
+        else:
+            # print("Test with feature before BN")
+            return global_feat
+
+    def detect_on_features(self, fpn_output, src_shape, img_info: Optional[Dict[str, torch.Tensor]] = None):
+        x_class = self.base.model.class_net(fpn_output)
+        x_box = self.base.model.box_net(fpn_output)
+        class_out, cls_un_al, cls_un_ep, box_out, box_un_al, box_un_ep, indices, classes = _post_process(
+            x_class, x_box, num_levels=self.base.num_levels, num_classes=self.base.num_classes,
+            max_detection_points=self.max_detection_points, num_gmm=self.base.num_gmm,
+            predict_uncertainties=self.base.predict_uncertainties,
+        )
+        if img_info is None:
+            img_scale, img_size = None, None
+        else:
+            img_scale, img_size = img_info['img_scale'], img_info['img_size']
+        return _batch_detection(
+            src_shape[0], class_out, cls_un_al, cls_un_ep, box_out, box_un_al, box_un_ep, self.base.anchors.boxes, indices,
+            classes,
+            img_scale, img_size, max_det_per_image=self.base.max_det_per_image, soft_nms=self.base.soft_nms,
+        )
+
     def reid_forward(self, x, target):
         x, box = x
         encoder_features = self.base.model.backbone(x)
