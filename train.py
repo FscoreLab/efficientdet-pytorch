@@ -464,7 +464,7 @@ def main():
         for epoch in range(start_epoch, num_epochs):
             if args.distributed:
                 loader_train.sampler.set_epoch(epoch)
-            reid_metrics = validate_reid(reid_evaluator, loader_eval_reid, epoch, writer)
+            # reid_metrics = validate_reid(reid_evaluator, loader_eval_reid, epoch, writer)
             train_metrics = train_epoch(
                 writer,
                 epoch, model, loader_train, loader_train_reid, optimizer, args,
