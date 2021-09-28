@@ -670,7 +670,7 @@ xbm_module=None, triplet_loss=None, classification_loss=None):
         score, feat, target_reid = model.reid_forward((img, boxes), target_reid)
         if xbm_module:
             xbm_module.enqueue_dequeue(feat.detach(), target_reid.detach())
-        loss_triplet = triplet_loss(feat, target_reid, feat, target_reid, sasat=True)[0]
+        loss_triplet = triplet_loss(feat, target_reid, feat, target_reid)[0]
         loss_class = classification_loss(score, target_reid)
         loss_det = output['loss']
         loss = loss_det + args.reid_loss_weight * loss_triplet + args.class_loss_weight * loss_class
