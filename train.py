@@ -464,7 +464,6 @@ def main():
         for epoch in range(start_epoch, num_epochs):
             if args.distributed:
                 loader_train.sampler.set_epoch(epoch)
-            # reid_metrics = validate_reid(reid_evaluator, loader_eval_reid, epoch, writer)
             train_metrics = train_epoch(
                 writer,
                 epoch, model, loader_train, loader_train_reid, optimizer, args,
@@ -507,7 +506,6 @@ def main():
             writer.add_scalar("reid/rank-1", reid_metrics['r-1'], global_step=epoch)
             writer.add_scalar("reid/rank-5", reid_metrics['r-5'], global_step=epoch)
             writer.add_scalar("reid/rank-10", reid_metrics['r-10'], global_step=epoch)
-
 
             if (eval_metrics["map"] > best_map):
                 save_path = os.path.join(saver.checkpoint_dir, "best_model.pth.tar")
@@ -657,7 +655,7 @@ xbm_module=None, triplet_loss=None, classification_loss=None):
         if epoch % 5 == 0 and batch_idx == 0:
             writer.add_images("samples/train", denorm_images(input), global_step=epoch)
             writer.add_images("samples/train_reid", denorm_images(img), global_step=epoch)
-            
+
         last_batch = batch_idx == last_idx
         data_time_m.update(time.time() - end)
 

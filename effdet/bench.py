@@ -41,8 +41,8 @@ def _sample_outputs(
         else:
             uncertainties_aleatoric.append(None)
             uncertainties_epistemic.append(None)
-            
-    return outputs, uncertainties_aleatoric, uncertainties_epistemic 
+
+    return outputs, uncertainties_aleatoric, uncertainties_epistemic
 
 
 def _cat_outputs(outputs: List[torch.Tensor], batch_size: int, last_dim_size: int):
@@ -57,12 +57,12 @@ def _post_process_uncertainties(
     gather_func: Callable[[torch.Tensor], torch.Tensor],
 ) -> List[Optional[torch.Tensor]]:
     if uncertainties[0] is None:
-        return [None] * batch_size 
+        return [None] * batch_size
     uncertainties_all = _cat_outputs(uncertainties, batch_size, last_dim_size)
     uncertainties_all_after_topk = gather_func(uncertainties_all)
     uncertainties_reduced = einops.reduce(uncertainties_all_after_topk, "b n k -> b n 1", "max")
     return uncertainties_reduced
-        
+
 
 def _post_process(
         cls_outputs: List[torch.Tensor],
@@ -280,29 +280,30 @@ class ReidBench(nn.Module):
         eba_config = OmegaConf.create()
         eba_config.update(config)
         self.fuse_backbone_1 = nn.Sequential(nn.Conv2d(384, 256, 3, 1, 1), nn.BatchNorm2d(256))
-        self.fuse_backbone_2 = nn.Sequential(nn.Conv2d(136,
-                                              256, 3, 2, 1), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256))
-        self.fuse_1_1 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels,
-                                                256, 3, 2, 1), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256))
-        self.fuse_1_2 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels,
-                                                256, 3, 1, 1), nn.BatchNorm2d(256))
+        self.fuse_backbone_2 = nn.Sequential(nn.Conv2d(136, 256, 3, 2, 1),
+                                             nn.Conv2d(256, 256, 3, padding=1),
+                                             nn.BatchNorm2d(256))
+        self.fuse_1_1 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, 2, 1),
+                                      nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256))
+        self.fuse_1_2 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, 1, 1),
+                                      nn.BatchNorm2d(256))
         self.fuse_1_4 = nn.Sequential(nn.ConvTranspose2d(self.base.config.fpn_channels, 256, 2, 2, 0, 0),
                          nn.Conv2d(256, 256, 3, padding=1),
                          nn.BatchNorm2d(256))
-        self.fuse_1_3 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels,
-                                                256, 3, 1, 1), nn.BatchNorm2d(256))
+        self.fuse_1_3 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, 1, 1), nn.BatchNorm2d(256))
 
-        self.fuse_1 = nn.Sequential(nn.Conv2d(512,
-                                              256, 3, 2, 1), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256))
-        self.fuse_2 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, padding=1), nn.BatchNorm2d(256))
-        self.fuse_3 = nn.Sequential(nn.ConvTranspose2d(512, 256, 2, 2, 0, 0), nn.Conv2d(256, 256, 3, padding=1),
+        self.fuse_1 = nn.Sequential(nn.Conv2d(512, 256, 3, 2, 1),
+                                    nn.Conv2d(256, 256, 3, padding=1),
+                                    nn.BatchNorm2d(256))
+        self.fuse_2 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, padding=1),
+                                    nn.BatchNorm2d(256))
+        self.fuse_3 = nn.Sequential(nn.ConvTranspose2d(512, 256, 2, 2, 0, 0),
+                                    nn.Conv2d(256, 256, 3, padding=1),
                                     nn.BatchNorm2d(256))
         self.feature_head = HeadNet(eba_config, self.in_planes)
 
         if self.neck == 'no':
             self.classifier = nn.Linear(self.in_planes, self.num_classes)
-            # self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)     # new add by luo
-            # self.classifier.apply(weights_init_classifier)  # new add by luo
         elif self.neck == 'bnneck':
             self.bottleneck = nn.BatchNorm1d(self.in_planes)
             self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)
@@ -347,10 +348,8 @@ class ReidBench(nn.Module):
             feat = self.bottleneck(global_feat)  # normalize for angular softmax
 
         if self.neck_feat == 'after':
-            # print("Test with feature after BN")
             return feat
         else:
-            # print("Test with feature before BN")
             return global_feat
 
     def detect_on_features(self, fpn_output, src_shape, img_info: Optional[Dict[str, torch.Tensor]] = None):
@@ -391,13 +390,6 @@ class ReidBench(nn.Module):
             self.fuse_1(m1), self.fuse_2(global_feat[2]), self.fuse_3(m2),
                                backbone_mask), dim=1))])[0]
 
-        # center_x = ((box[..., 3] + box[..., 1]) // 2).flatten()
-        # center_y = ((box[..., 4] + box[..., 2]) // 2).flatten()
-        # idx = box[..., 0].flatten()
-        # global_feat = global_feat[idx, :,
-        #                          (center_y * global_feat.shape[-2] / x.shape[-2]).long(),
-        #                          (center_x * global_feat.shape[-1] / x.shape[-1]).long()]
-
         global_feat = roi_align(global_feat, box[0].float(), output_size=(1, 1),
                                 spatial_scale=global_feat.shape[-2] / x.shape[-2], aligned=True)
 
@@ -412,10 +404,8 @@ class ReidBench(nn.Module):
             return cls_score, global_feat, target.flatten()  # global feature for triplet loss
         else:
             if self.neck_feat == 'after':
-                # print("Test with feature after BN")
                 return feat, (sum(target[0], []), sum([list(el) for el in target[1]], []))  # feat
             else:
-                # print("Test with feature before BN")
                 return global_feat, target
 
 
@@ -423,7 +413,6 @@ class ReidEvalBench(nn.Module):
     def __init__(self, model):
         super(ReidEvalBench, self).__init__()
         self.base = model
-
 
     def forward(self, *x):
         return self.base.reid_forward(*x)
