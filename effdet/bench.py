@@ -112,7 +112,7 @@ def _post_process(
     box_outputs_all = _cat_outputs(box_outputs, batch_size, 4)
 
     _, cls_topk_indices_all = torch.topk(cls_outputs_all.reshape(batch_size, -1), dim=1, k=max_detection_points)
-    indices_all = cls_topk_indices_all // num_classes
+    indices_all = torch.div(cls_topk_indices_all, num_classes, rounding_mode="trunc")
     classes_all = cls_topk_indices_all % num_classes
 
     box_outputs_all_after_topk = _gather_box_outputs(box_outputs_all, indices_all)
