@@ -4,6 +4,10 @@ Adapted for PyTorch from Tensorflow impl at
     https://github.com/google/automl/blob/6f6694cec1a48cdb33d5d1551a2d5db8ad227798/efficientdet/anchors.py
 
 Hacked together by Ross Wightman, original copyright below
+"Anchor definition.
+
+This module is borrowed from TPU RetinaNet implementation:
+https://github.com/tensorflow/tpu/blob/master/models/official/retinanet/anchors.py
 """
 # Copyright 2020 Google Research. All Rights Reserved.
 #
@@ -19,23 +23,25 @@ Hacked together by Ross Wightman, original copyright below
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Anchor definition.
-
-This module is borrowed from TPU RetinaNet implementation:
-https://github.com/tensorflow/tpu/blob/master/models/official/retinanet/anchors.py
-"""
-from typing import Optional, Tuple, Sequence
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
-#import torchvision.ops.boxes as tvb
-from torchvision.ops.boxes import batched_nms, remove_small_boxes
-from typing import List
+from einops import einops
 
-from effdet.object_detection import ArgMaxMatcher, FasterRcnnBoxCoder, BoxList, IouSimilarity, TargetAssigner
+# import torchvision.ops.boxes as tvb
+from torchvision.ops.boxes import batched_nms
+
+from effdet.object_detection import (
+    BoxList,
+    FasterRcnnBoxCoder,
+    IouSimilarity,
+    TargetAssigner,
+)
+
+from .object_detection.argmax_matcher import MinCostMatcher
 from .soft_nms import batched_soft_nms
-
 
 # The minimum score to consider a logit for identifying detections.
 MIN_CLASS_SCORE = -5.0
@@ -44,7 +50,7 @@ MIN_CLASS_SCORE = -5.0
 _DUMMY_DETECTION_SCORE = -1e5
 
 
-def decode_box_outputs(rel_codes, anchors, output_xyxy: bool=False):
+def decode_box_outputs(rel_codes, anchors, output_xyxy: bool = False):
     """Transforms relative regression coordinates to absolute positions.
 
     Network predictions are normalized and relative to a given anchor; this
@@ -70,10 +76,10 @@ def decode_box_outputs(rel_codes, anchors, output_xyxy: bool=False):
     h = torch.exp(th) * ha
     ycenter = ty * ha + ycenter_a
     xcenter = tx * wa + xcenter_a
-    ymin = ycenter - h / 2.
-    xmin = xcenter - w / 2.
-    ymax = ycenter + h / 2.
-    xmax = xcenter + w / 2.
+    ymin = ycenter - h / 2.0
+    xmin = xcenter - w / 2.0
+    ymax = ycenter + h / 2.0
+    xmax = xcenter + w / 2.0
     if output_xyxy:
         out = torch.stack([xmin, ymin, xmax, ymax], dim=1)
     else:
@@ -89,15 +95,20 @@ def clip_boxes_xyxy(boxes: torch.Tensor, size: torch.Tensor):
 
 
 def generate_detections(
-        cls_outputs,
-        cls_uncertainty_al: Optional[torch.Tensor],
-        cls_uncertainty_ep: Optional[torch.Tensor],
-        box_outputs,
-        box_uncertainty_al: Optional[torch.Tensor],
-        box_uncertainty_ep: Optional[torch.Tensor],
-        anchor_boxes, indices, classes,
-        img_scale: Optional[torch.Tensor], img_size: Optional[torch.Tensor],
-        max_det_per_image: int = 100, soft_nms: bool = False):
+    cls_outputs,
+    cls_uncertainty_al: Optional[torch.Tensor],
+    cls_uncertainty_ep: Optional[torch.Tensor],
+    box_outputs,
+    box_uncertainty_al: Optional[torch.Tensor],
+    box_uncertainty_ep: Optional[torch.Tensor],
+    anchor_boxes,
+    indices,
+    classes,
+    img_scale: Optional[torch.Tensor],
+    img_size: Optional[torch.Tensor],
+    max_det_per_image: int = 100,
+    soft_nms: bool = False,
+):
     """Generates detections with RetinaNet model outputs and anchors.
 
     Args:
@@ -142,7 +153,8 @@ def generate_detections(
     scores = cls_outputs.sigmoid().squeeze(1).float()
     if soft_nms:
         top_detection_idx, soft_scores = batched_soft_nms(
-            boxes, scores, classes, method_gaussian=True, iou_threshold=0.3, score_threshold=.001)
+            boxes, scores, classes, method_gaussian=True, iou_threshold=0.3, score_threshold=0.001
+        )
         scores[top_detection_idx] = soft_scores
     else:
         top_detection_idx = batched_nms(boxes, scores, classes, iou_threshold=0.5)
@@ -152,7 +164,12 @@ def generate_detections(
     boxes = boxes[top_detection_idx]
     scores = scores[top_detection_idx, None]
     classes = classes[top_detection_idx, None] + 1  # back to class idx with background class = 0
-    if cls_uncertainty_al is not None and cls_uncertainty_ep is not None and box_uncertainty_al is not None and box_uncertainty_ep is not None:
+    if (
+        cls_uncertainty_al is not None
+        and cls_uncertainty_ep is not None
+        and box_uncertainty_al is not None
+        and box_uncertainty_ep is not None
+    ):
         cls_uncertainty_al = cls_uncertainty_al[top_detection_idx]
         cls_uncertainty_ep = cls_uncertainty_ep[top_detection_idx]
         box_uncertainty_al = box_uncertainty_al[top_detection_idx]
@@ -166,17 +183,36 @@ def generate_detections(
 
     # stack em and pad out to max_det_per_image if necessary
     num_det = len(top_detection_idx)
-    if cls_uncertainty_al is not None and cls_uncertainty_ep is not None and box_uncertainty_al is not None and box_uncertainty_ep is not None:
-        detections = torch.cat([boxes, scores, classes.float(),
-                                box_uncertainty_al, box_uncertainty_ep,
-                                cls_uncertainty_al, cls_uncertainty_ep], dim=1)
+    if (
+        cls_uncertainty_al is not None
+        and cls_uncertainty_ep is not None
+        and box_uncertainty_al is not None
+        and box_uncertainty_ep is not None
+    ):
+        detections = torch.cat(
+            [
+                boxes,
+                scores,
+                classes.float(),
+                box_uncertainty_al,
+                box_uncertainty_ep,
+                cls_uncertainty_al,
+                cls_uncertainty_ep,
+            ],
+            dim=1,
+        )
     else:
         detections = torch.cat([boxes, scores, classes.float()], dim=1)
     if num_det < max_det_per_image:
-        detections = torch.cat([
-            detections,
-            torch.zeros((max_det_per_image - num_det, detections.shape[1]), device=detections.device, dtype=detections.dtype)
-        ], dim=0)
+        detections = torch.cat(
+            [
+                detections,
+                torch.zeros(
+                    (max_det_per_image - num_det, detections.shape[1]), device=detections.device, dtype=detections.dtype
+                ),
+            ],
+            dim=0,
+        )
     return detections
 
 
@@ -234,19 +270,23 @@ class Anchors(nn.Module):
 
         assert isinstance(image_size, Sequence) and len(image_size) == 2
         # FIXME this restriction can likely be relaxed with some additional changes
-        assert image_size[0] % 2 ** max_level == 0, 'Image size must be divisible by 2 ** max_level (128)'
-        assert image_size[1] % 2 ** max_level == 0, 'Image size must be divisible by 2 ** max_level (128)'
+        assert image_size[0] % 2 ** max_level == 0, "Image size must be divisible by 2 ** max_level (128)"
+        assert image_size[1] % 2 ** max_level == 0, "Image size must be divisible by 2 ** max_level (128)"
         self.image_size = tuple(image_size)
         self.feat_sizes = get_feat_sizes(image_size, max_level)
         self.config = self._generate_configs()
-        self.register_buffer('boxes', self._generate_boxes())
+        self.register_buffer("boxes", self._generate_boxes())
 
     @classmethod
     def from_config(cls, config):
         return cls(
-            config.min_level, config.max_level,
-            config.num_scales, config.aspect_ratios,
-            config.anchor_scale, config.image_size)
+            config.min_level,
+            config.max_level,
+            config.num_scales,
+            config.aspect_ratios,
+            config.anchor_scale,
+            config.image_size,
+        )
 
     def _generate_configs(self):
         """Generate configurations of anchor boxes."""
@@ -257,10 +297,13 @@ class Anchors(nn.Module):
             for scale_octave in range(self.num_scales):
                 for aspect in self.aspect_ratios:
                     anchor_configs[level].append(
-                        ((feat_sizes[0][0] // feat_sizes[level][0],
-                          feat_sizes[0][1] // feat_sizes[level][1]),
-                         scale_octave / float(self.num_scales), aspect,
-                         self.anchor_scales[level - self.min_level]))
+                        (
+                            (feat_sizes[0][0] // feat_sizes[level][0], feat_sizes[0][1] // feat_sizes[level][1]),
+                            scale_octave / float(self.num_scales),
+                            aspect,
+                            self.anchor_scales[level - self.min_level],
+                        )
+                    )
         return anchor_configs
 
     def _generate_boxes(self):
@@ -287,8 +330,9 @@ class Anchors(nn.Module):
                 xv = xv.reshape(-1)
                 yv = yv.reshape(-1)
 
-                boxes = np.vstack((yv - anchor_size_y_2, xv - anchor_size_x_2,
-                                   yv + anchor_size_y_2, xv + anchor_size_x_2))
+                boxes = np.vstack(
+                    (yv - anchor_size_y_2, xv - anchor_size_x_2, yv + anchor_size_y_2, xv + anchor_size_x_2)
+                )
                 boxes = np.swapaxes(boxes, 0, 1)
                 boxes_level.append(np.expand_dims(boxes, axis=1))
 
@@ -305,10 +349,11 @@ class Anchors(nn.Module):
 
 
 class AnchorLabeler(object):
-    """Labeler for multiscale anchor boxes.
-    """
+    """Labeler for multiscale anchor boxes."""
 
-    def __init__(self, anchors, num_classes: int, match_threshold: float = 0.5):
+    def __init__(
+        self, anchors, num_classes: int, match_threshold: float = 0.5, use_pred_boxes: bool = True, class_weight=0.1
+    ):
         """Constructs anchor labeler to assign labels to anchors.
 
         Args:
@@ -320,19 +365,23 @@ class AnchorLabeler(object):
                 to assign positive labels for anchors.
         """
         similarity_calc = IouSimilarity()
-        matcher = ArgMaxMatcher(
-            match_threshold,
-            unmatched_threshold=match_threshold,
-            negatives_lower_than_unmatched=True,
-            force_match_for_each_row=True)
+        # matcher = ArgMaxMatcher(
+        #     match_threshold,
+        #     unmatched_threshold=match_threshold,
+        #     negatives_lower_than_unmatched=True,
+        #     force_match_for_each_row=False)
+
+        matcher = MinCostMatcher()
         box_coder = FasterRcnnBoxCoder()
 
-        self.target_assigner = TargetAssigner(similarity_calc, matcher, box_coder)
+        self.target_assigner = TargetAssigner(similarity_calc, matcher, box_coder, class_weight=class_weight)
         self.anchors = anchors
         self.match_threshold = match_threshold
         self.num_classes = num_classes
         self.indices_cache = {}
+        self.use_pred_boxes = use_pred_boxes
 
+    @torch.no_grad()
     def label_anchors(self, gt_boxes, gt_classes, filter_valid=True):
         """Labels anchors with ground truth inputs.
 
@@ -364,7 +413,8 @@ class AnchorLabeler(object):
             gt_classes = gt_classes[valid_idx]
 
         cls_targets, box_targets, matches = self.target_assigner.assign(
-            BoxList(self.anchors.boxes), BoxList(gt_boxes), gt_classes)
+            BoxList(self.anchors.boxes), BoxList(gt_boxes), gt_classes
+        )
 
         # class labels start from 1 and the background class = -1
         cls_targets = (cls_targets - 1).long()
@@ -375,15 +425,15 @@ class AnchorLabeler(object):
         for level in range(self.anchors.min_level, self.anchors.max_level + 1):
             feat_size = self.anchors.feat_sizes[level]
             steps = feat_size[0] * feat_size[1] * self.anchors.get_anchors_per_location()
-            cls_targets_out.append(cls_targets[count:count + steps].view([feat_size[0], feat_size[1], -1]))
-            box_targets_out.append(box_targets[count:count + steps].view([feat_size[0], feat_size[1], -1]))
+            cls_targets_out.append(cls_targets[count : count + steps].view([feat_size[0], feat_size[1], -1]))
+            box_targets_out.append(box_targets[count : count + steps].view([feat_size[0], feat_size[1], -1]))
             count += steps
 
         num_positives = (matches.match_results > -1).float().sum()
 
         return cls_targets_out, box_targets_out, num_positives
 
-    def batch_label_anchors(self, gt_boxes, gt_classes, filter_valid=True):
+    def batch_label_anchors(self, gt_boxes, gt_classes, pred_classes, pred_boxes, filter_valid=True):
         batch_size = len(gt_boxes)
         assert batch_size == len(gt_classes)
         num_levels = self.anchors.max_level - self.anchors.min_level + 1
@@ -392,6 +442,10 @@ class AnchorLabeler(object):
         num_positives_out = []
 
         anchor_box_list = BoxList(self.anchors.boxes)
+        anchors_class_pred = torch.cat([einops.rearrange(mask, "b h w c-> b (h w c)") for mask in pred_classes], dim=-1)
+        anchors_box_pred = torch.cat(
+            [einops.rearrange(mask, "b h w (c k)-> b (h w c) k", k=4) for mask in pred_boxes], dim=1
+        )
         for i in range(batch_size):
             last_sample = i == batch_size - 1
 
@@ -402,7 +456,14 @@ class AnchorLabeler(object):
             else:
                 gt_box_list = BoxList(gt_boxes[i])
                 gt_class_i = gt_classes[i]
-            cls_targets, box_targets, matches = self.target_assigner.assign(anchor_box_list, gt_box_list, gt_class_i)
+            anchors_class_pred_i = anchors_class_pred[i]
+            anchors_box_pred_i = BoxList(
+                decode_box_outputs(anchors_box_pred[i].float(), anchor_box_list.boxes(), output_xyxy=True)
+            )
+            boxes = anchors_box_pred_i if self.use_pred_boxes else anchor_box_list
+            cls_targets, box_targets, matches = self.target_assigner.assign(
+                boxes, gt_box_list, anchors_class_pred_i, gt_class_i
+            )
 
             # class labels start from 1 and the background class = -1
             cls_targets = (cls_targets - 1).long()
@@ -415,9 +476,11 @@ class AnchorLabeler(object):
                 feat_size = self.anchors.feat_sizes[level]
                 steps = feat_size[0] * feat_size[1] * self.anchors.get_anchors_per_location()
                 cls_targets_out[level_idx].append(
-                    cls_targets[count:count + steps].view([feat_size[0], feat_size[1], -1]))
+                    cls_targets[count : count + steps].view([feat_size[0], feat_size[1], -1])
+                )
                 box_targets_out[level_idx].append(
-                    box_targets[count:count + steps].view([feat_size[0], feat_size[1], -1]))
+                    box_targets[count : count + steps].view([feat_size[0], feat_size[1], -1])
+                )
                 count += steps
                 if last_sample:
                     cls_targets_out[level_idx] = torch.stack(cls_targets_out[level_idx])
@@ -428,4 +491,3 @@ class AnchorLabeler(object):
                 num_positives_out = torch.stack(num_positives_out)
 
         return cls_targets_out, box_targets_out, num_positives_out
-
