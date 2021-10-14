@@ -403,7 +403,7 @@ def main():
             num_classes=args.num_classes,
             pretrained=args.pretrained,
             pretrained_backbone=args.pretrained_backbone,
-            redundant_bias=args.redundant_bias,
+            redundant_bias=False,
             label_smoothing=args.smoothing,
             legacy_focal=args.legacy_focal,
             jit_loss=args.jit_loss,
@@ -549,6 +549,8 @@ def main():
         for epoch in range(start_epoch, num_epochs):
             if args.distributed:
                 loader_train.sampler.set_epoch(epoch)
+
+            # eval_metrics = validate(writer, epoch, model, loader_eval, args, evaluator)
 
             train_metrics = train_epoch(
                 writer,
@@ -717,7 +719,6 @@ def train_epoch(
     losses_m = AverageMeter()
 
     model.train()
-    _freeze_bn(model)
 
     end = time.time()
     last_idx = len(loader) - 1

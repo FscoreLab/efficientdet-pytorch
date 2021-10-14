@@ -254,6 +254,7 @@ class DetBenchTrain(nn.Module):
                 match_threshold=None,
                 use_pred_boxes=use_pred_boxes,
                 class_weight=class_weight,
+                congig=model.config,
             )
         self.loss_fn = DetectionLoss(model.config)
         self.predict_uncertainties = predict_uncertainties

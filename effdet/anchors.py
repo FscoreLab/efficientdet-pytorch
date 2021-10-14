@@ -108,6 +108,7 @@ def generate_detections(
     img_size: Optional[torch.Tensor],
     max_det_per_image: int = 100,
     soft_nms: bool = False,
+    nms: bool = False,
 ):
     """Generates detections with RetinaNet model outputs and anchors.
 
@@ -151,13 +152,16 @@ def generate_detections(
         boxes = clip_boxes_xyxy(boxes, img_size / img_scale)  # clip before NMS better?
 
     scores = cls_outputs.sigmoid().squeeze(1).float()
-    if soft_nms:
-        top_detection_idx, soft_scores = batched_soft_nms(
-            boxes, scores, classes, method_gaussian=True, iou_threshold=0.3, score_threshold=0.001
-        )
-        scores[top_detection_idx] = soft_scores
+    if nms:
+        if soft_nms:
+            top_detection_idx, soft_scores = batched_soft_nms(
+                boxes, scores, classes, method_gaussian=True, iou_threshold=0.3, score_threshold=0.001
+            )
+            scores[top_detection_idx] = soft_scores
+        else:
+            top_detection_idx = batched_nms(boxes, scores, classes, iou_threshold=0.5)
     else:
-        top_detection_idx = batched_nms(boxes, scores, classes, iou_threshold=0.5)
+        top_detection_idx = torch.arange(boxes.shape[0])
 
     # keep only top max_det_per_image scoring predictions
     top_detection_idx = top_detection_idx[:max_det_per_image]
@@ -352,7 +356,13 @@ class AnchorLabeler(object):
     """Labeler for multiscale anchor boxes."""
 
     def __init__(
-        self, anchors, num_classes: int, match_threshold: float = 0.5, use_pred_boxes: bool = True, class_weight=0.1
+        self,
+        anchors,
+        num_classes: int,
+        match_threshold: float = 0.5,
+        use_pred_boxes: bool = True,
+        class_weight=0.1,
+        congig=None,
     ):
         """Constructs anchor labeler to assign labels to anchors.
 
@@ -374,7 +384,9 @@ class AnchorLabeler(object):
         matcher = MinCostMatcher()
         box_coder = FasterRcnnBoxCoder()
 
-        self.target_assigner = TargetAssigner(similarity_calc, matcher, box_coder, class_weight=class_weight)
+        self.target_assigner = TargetAssigner(
+            similarity_calc, matcher, box_coder, class_weight=class_weight, config=congig
+        )
         self.anchors = anchors
         self.match_threshold = match_threshold
         self.num_classes = num_classes
@@ -458,7 +470,7 @@ class AnchorLabeler(object):
                 gt_class_i = gt_classes[i]
             anchors_class_pred_i = anchors_class_pred[i]
             anchors_box_pred_i = BoxList(
-                decode_box_outputs(anchors_box_pred[i].float(), anchor_box_list.boxes(), output_xyxy=True)
+                decode_box_outputs(anchors_box_pred[i].float(), anchor_box_list.boxes(), output_xyxy=False)
             )
             boxes = anchors_box_pred_i if self.use_pred_boxes else anchor_box_list
             cls_targets, box_targets, matches = self.target_assigner.assign(
