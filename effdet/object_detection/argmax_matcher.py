@@ -191,6 +191,6 @@ class ArgMaxMatcher(Matcher):  # cannot inherit with torchscript
 class MinCostMatcher(Matcher):
     def _match_when_rows_are_non_empty(self, similarity_matrix):
         matches = self._match_when_rows_are_empty(similarity_matrix)
-        _, col_idx = linear_sum_assignment(similarity_matrix.cpu().numpy(), maximize=True)
+        _, col_idx = linear_sum_assignment(similarity_matrix.cpu().numpy(), maximize=False)
         matches[col_idx] = torch.arange(similarity_matrix.shape[0], device=matches.device)
         return matches

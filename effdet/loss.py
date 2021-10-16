@@ -5,18 +5,18 @@ https://github.com/google/automl/tree/master/efficientdet
 
 Copyright 2020 Ross Wightman
 """
+from typing import List, Optional, Tuple
+
 import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Optional, List, Tuple
 
-
-def _sample_outputs(outputs: torch.Tensor, num_gmm: int) -> torch.Tensor:
+def _sample_outputs(outputs: torch.Tensor, num_gmm: int, std_weight: float = 1) -> torch.Tensor:
     mean, var, weights = torch.tensor_split(outputs, 3, dim=-1)
     std = torch.sqrt(torch.sigmoid(var))
-    normal_outputs = std * torch.randn(std.shape, device=std.device) + mean
+    normal_outputs = std_weight * std * torch.randn(std.shape, device=std.device) + mean
     weights = einops.rearrange(weights, "b h w (c k) -> b h w c k", k=num_gmm)
     weights = torch.softmax(weights, dim=-1)
     weights = einops.rearrange(weights, "b h w c k -> b h w (c k)", k=num_gmm)
@@ -50,7 +50,7 @@ def focal_loss_legacy(logits, targets, alpha: float, gamma: float, normalizer):
         loss: A float32 scalar representing normalized total loss.
     """
     positive_label_mask = targets == 1.0
-    cross_entropy = F.binary_cross_entropy_with_logits(logits, targets.to(logits.dtype), reduction='none')
+    cross_entropy = F.binary_cross_entropy_with_logits(logits, targets.to(logits.dtype), reduction="none")
     neg_logits = -1.0 * logits
     modulator = torch.exp(gamma * targets * neg_logits - gamma * torch.log1p(torch.exp(neg_logits)))
 
@@ -60,7 +60,9 @@ def focal_loss_legacy(logits, targets, alpha: float, gamma: float, normalizer):
 
 
 @torch.jit.ignore()
-def new_focal_loss(logits, targets, num_gmm: int, alpha: float, gamma: float, normalizer, label_smoothing: float = 0.01):
+def new_focal_loss(
+    logits, targets, num_gmm: int, alpha: float, gamma: float, normalizer, label_smoothing: float = 0.01
+):
     """Compute the focal loss between `logits` and the golden `target` values.
 
     'New' is not the best descriptor, but this focal loss impl matches recent versions of
@@ -86,24 +88,22 @@ def new_focal_loss(logits, targets, num_gmm: int, alpha: float, gamma: float, no
     # compute focal loss multipliers before label smoothing, such that it will not blow up the loss.
     pred_prob = logits.sigmoid()
     targets = targets.to(logits.dtype)
-    onem_targets = 1. - targets
-    p_t = (targets * pred_prob) + (onem_targets * (1. - pred_prob))
-    alpha_factor = targets * alpha + onem_targets * (1. - alpha)
-    modulating_factor = (1. - p_t) ** gamma
+    onem_targets = 1.0 - targets
+    p_t = (targets * pred_prob) + (onem_targets * (1.0 - pred_prob))
+    alpha_factor = targets * alpha + onem_targets * (1.0 - alpha)
+    modulating_factor = (1.0 - p_t) ** gamma
 
     # apply label smoothing for cross_entropy for each entry.
-    if label_smoothing > 0.:
-        targets = targets * (1. - label_smoothing) + .5 * label_smoothing
-    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+    if label_smoothing > 0.0:
+        targets = targets * (1.0 - label_smoothing) + 0.5 * label_smoothing
+    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
 
     # compute the final loss and return
     return (1 / normalizer) * alpha_factor * modulating_factor * ce
 
 
-def huber_loss(
-        input, target, delta: float = 1., weights: Optional[torch.Tensor] = None, size_average: bool = True):
-    """
-    """
+def huber_loss(input, target, delta: float = 1.0, weights: Optional[torch.Tensor] = None, size_average: bool = True):
+    """"""
     err = input - target
     abs_err = err.abs()
     quadratic = torch.clamp(abs_err, max=delta)
@@ -118,7 +118,8 @@ def huber_loss(
 
 
 def smooth_l1_loss(
-        input, target, beta: float = 1. / 9, weights: Optional[torch.Tensor] = None, size_average: bool = True):
+    input, target, beta: float = 1.0 / 9, weights: Optional[torch.Tensor] = None, size_average: bool = True
+):
     """
     very similar to the smooth_l1_loss from pytorch, but with the extra beta parameter
     """
@@ -163,20 +164,20 @@ def one_hot(x, num_classes: int):
 
 
 def loss_fn(
-        cls_outputs: List[torch.Tensor],
-        box_outputs: List[torch.Tensor],
-        cls_targets: List[torch.Tensor],
-        box_targets: List[torch.Tensor],
-        num_positives: torch.Tensor,
-        num_classes: int,
-        num_gmm: int,
-        alpha: float,
-        gamma: float,
-        delta: float,
-        box_loss_weight: float,
-        label_smoothing: float = 0.,
-        legacy_focal: bool = False,
-        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cls_outputs: List[torch.Tensor],
+    box_outputs: List[torch.Tensor],
+    cls_targets: List[torch.Tensor],
+    box_targets: List[torch.Tensor],
+    num_positives: torch.Tensor,
+    num_classes: int,
+    num_gmm: int,
+    alpha: float,
+    gamma: float,
+    delta: float,
+    box_loss_weight: float,
+    label_smoothing: float = 0.0,
+    legacy_focal: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Computes total detection loss.
     Computes total detection loss including box and class loss from all levels.
     Args:
@@ -218,22 +219,31 @@ def loss_fn(
         cls_outputs_at_level = cls_outputs[l].permute(0, 2, 3, 1).float()
         if legacy_focal:
             cls_loss = focal_loss_legacy(
-                cls_outputs_at_level, cls_targets_at_level_oh,
-                alpha=alpha, gamma=gamma, normalizer=num_positives_sum)
+                cls_outputs_at_level, cls_targets_at_level_oh, alpha=alpha, gamma=gamma, normalizer=num_positives_sum
+            )
         else:
             cls_loss = new_focal_loss(
-                cls_outputs_at_level, cls_targets_at_level_oh, num_gmm=num_gmm,
-                alpha=alpha, gamma=gamma, normalizer=num_positives_sum, label_smoothing=label_smoothing)
+                cls_outputs_at_level,
+                cls_targets_at_level_oh,
+                num_gmm=num_gmm,
+                alpha=alpha,
+                gamma=gamma,
+                normalizer=num_positives_sum,
+                label_smoothing=label_smoothing,
+            )
         cls_loss = cls_loss.view(bs, height, width, -1, num_classes)
         cls_loss = cls_loss * (cls_targets_at_level != -2).unsqueeze(-1)
-        cls_losses.append(cls_loss.sum())   # FIXME reference code added a clamp here at some point ...clamp(0, 2))
+        cls_losses.append(cls_loss.sum())  # FIXME reference code added a clamp here at some point ...clamp(0, 2))
 
-        box_losses.append(_box_loss(
-            box_outputs[l].permute(0, 2, 3, 1).float(),
-            box_targets_at_level,
-            num_positives_sum,
-            num_gmm=num_gmm,
-            delta=delta))
+        box_losses.append(
+            _box_loss(
+                box_outputs[l].permute(0, 2, 3, 1).float(),
+                box_targets_at_level,
+                num_positives_sum,
+                num_gmm=num_gmm,
+                delta=delta,
+            )
+        )
 
     # Sum per level losses to total loss.
     cls_loss = torch.sum(torch.stack(cls_losses, dim=-1), dim=-1)
@@ -247,7 +257,7 @@ loss_jit = torch.jit.script(loss_fn)
 
 class DetectionLoss(nn.Module):
 
-    __constants__ = ['num_classes']
+    __constants__ = ["num_classes"]
 
     def __init__(self, config):
         super(DetectionLoss, self).__init__()
@@ -263,12 +273,13 @@ class DetectionLoss(nn.Module):
         self.use_jit = config.jit_loss
 
     def forward(
-            self,
-            cls_outputs: List[torch.Tensor],
-            box_outputs: List[torch.Tensor],
-            cls_targets: List[torch.Tensor],
-            box_targets: List[torch.Tensor],
-            num_positives: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self,
+        cls_outputs: List[torch.Tensor],
+        box_outputs: List[torch.Tensor],
+        cls_targets: List[torch.Tensor],
+        box_targets: List[torch.Tensor],
+        num_positives: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         l_fn = loss_fn
         if not torch.jit.is_scripting() and self.use_jit:
@@ -277,6 +288,17 @@ class DetectionLoss(nn.Module):
             l_fn = loss_jit
 
         return l_fn(
-            cls_outputs, box_outputs, cls_targets, box_targets, num_positives,
-            num_classes=self.num_classes, num_gmm=self.num_gmm, alpha=self.alpha, gamma=self.gamma, delta=self.delta,
-            box_loss_weight=self.box_loss_weight, label_smoothing=self.label_smoothing, legacy_focal=self.legacy_focal)
+            cls_outputs,
+            box_outputs,
+            cls_targets,
+            box_targets,
+            num_positives,
+            num_classes=self.num_classes,
+            num_gmm=self.num_gmm,
+            alpha=self.alpha,
+            gamma=self.gamma,
+            delta=self.delta,
+            box_loss_weight=self.box_loss_weight,
+            label_smoothing=self.label_smoothing,
+            legacy_focal=self.legacy_focal,
+        )

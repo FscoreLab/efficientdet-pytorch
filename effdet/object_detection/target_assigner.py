@@ -33,7 +33,6 @@ images must be handled externally.
 from typing import Optional
 
 import torch
-from torch.nn.functional import binary_cross_entropy_with_logits
 
 from . import box_list
 from .argmax_matcher import ArgMaxMatcher
@@ -163,16 +162,12 @@ class TargetAssigner(object):
         #     groundtruth_weights = torch.ones([num_gt_boxes], device=device)
 
         match_quality_matrix = self._similarity_calc.compare(groundtruth_boxes, anchors)
-        cross_entropy = binary_cross_entropy_with_logits(
-            class_predicts, torch.zeros_like(class_predicts), reduction="none"
-        )
-        neg_logits = -1.0 * class_predicts
-        modulator = torch.exp(
-            self.config.gamma * neg_logits * 0 - self.config.gamma * torch.log1p(torch.exp(neg_logits))
-        )
-        loss = modulator * cross_entropy
-        # loss = binary_cross_entropy_with_logits(class_predicts, torch.zeros_like(class_predicts), reduction="none")
-        match_quality_matrix = match_quality_matrix + self.class_weight * loss.T[None, ...]
+        out_prob = class_predicts.sigmoid()
+        neg_cost_class = (1 - self.config.alpha) * (out_prob ** self.config.gamma) * (-(1 - out_prob + 1e-8).log())
+        pos_cost_class = self.config.alpha * ((1 - out_prob) ** self.config.gamma) * (-(out_prob + 1e-8).log())
+        loss = pos_cost_class - neg_cost_class
+        l1_loss = torch.cdist(groundtruth_boxes.boxes(), anchors.boxes(), p=1)
+        match_quality_matrix = -2 * match_quality_matrix + self.class_weight * loss.T[None, ...] + 5 * l1_loss
         matches = self._matcher.match(match_quality_matrix)
         reg_targets = self._create_regression_targets(anchors, groundtruth_boxes, matches)
         cls_targets = self._create_classification_targets(groundtruth_labels, matches)

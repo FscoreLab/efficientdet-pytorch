@@ -270,10 +270,12 @@ class DetBenchTrain(nn.Module):
             num_positives = target["label_num_positives"]
         else:
             cls_output = [
-                sample_loss(einops.rearrange(layer.detach(), "b c h w -> b h w c"), self.num_gmm) for layer in class_out
+                sample_loss(einops.rearrange(layer.detach(), "b c h w -> b h w c"), self.num_gmm, std_weight=0)
+                for layer in class_out
             ]
             box_output = [
-                sample_loss(einops.rearrange(layer.detach(), "b c h w -> b h w c"), self.num_gmm) for layer in box_out
+                sample_loss(einops.rearrange(layer.detach(), "b c h w -> b h w c"), self.num_gmm, std_weight=0)
+                for layer in box_out
             ]
             cls_targets, box_targets, num_positives = self.anchor_labeler.batch_label_anchors(
                 target["bbox"], target["cls"], cls_output, box_output
