@@ -6,18 +6,19 @@ from .helpers import load_pretrained, load_checkpoint
 
 def create_model(
         model_name, bench_task='', num_classes=None, pretrained=False,
-        checkpoint_path='', checkpoint_ema=False, predict_uncertainties=False, **kwargs):
+        checkpoint_path='', checkpoint_ema=False, predict_uncertainties=False, confluence=False, **kwargs):
 
     config = get_efficientdet_config(model_name)
     return create_model_from_config(
         config, bench_task=bench_task, num_classes=num_classes, pretrained=pretrained,
         checkpoint_path=checkpoint_path, checkpoint_ema=checkpoint_ema, predict_uncertainties=predict_uncertainties,
+        confluence=confluence,
         **kwargs)
 
 
 def create_model_from_config(
         config, bench_task='', num_classes=None, pretrained=False,
-        checkpoint_path='', checkpoint_ema=False, predict_uncertainties=False, **kwargs):
+        checkpoint_path='', checkpoint_ema=False, predict_uncertainties=False, confluence=False, **kwargs):
 
     pretrained_backbone = kwargs.pop('pretrained_backbone', True)
     if pretrained or checkpoint_path:
@@ -52,5 +53,5 @@ def create_model_from_config(
     if bench_task == 'train':
         model = DetBenchTrain(model, create_labeler=labeler, predict_uncertainties=predict_uncertainties)
     elif bench_task == 'predict':
-        model = DetBenchPredict(model, predict_uncertainties=predict_uncertainties)
+        model = DetBenchPredict(model, predict_uncertainties=predict_uncertainties, confluence=confluence)
     return model

@@ -165,6 +165,7 @@ def _batch_detection(
     img_size: Optional[torch.Tensor] = None,
     max_det_per_image: int = 100,
     soft_nms: bool = False,
+    confluence: bool = False,
 ):
     batch_detections = []
     # FIXME we may be able to do this as a batch with some tensor reshaping/indexing, PR welcome
@@ -185,13 +186,14 @@ def _batch_detection(
             img_size_i,
             max_det_per_image=max_det_per_image,
             soft_nms=soft_nms,
+            confluence=confluence
         )
         batch_detections.append(detections)
     return torch.stack(batch_detections, dim=0)
 
 
 class DetBenchPredict(nn.Module):
-    def __init__(self, model, predict_uncertainties=False):
+    def __init__(self, model, predict_uncertainties=False, confluence=False):
         super(DetBenchPredict, self).__init__()
         self.model = model
         self.config = model.config  # FIXME remove this when we can use @property (torchscript limitation)
@@ -203,6 +205,7 @@ class DetBenchPredict(nn.Module):
         self.max_det_per_image = model.config.max_det_per_image
         self.soft_nms = model.config.soft_nms
         self.predict_uncertainties = predict_uncertainties
+        self.confluence = confluence
 
     def forward(self, x, img_info: Optional[Dict[str, torch.Tensor]] = None):
         class_out, box_out = self.model(x)
@@ -234,6 +237,7 @@ class DetBenchPredict(nn.Module):
             img_size,
             max_det_per_image=self.max_det_per_image,
             soft_nms=self.soft_nms,
+            confluence=self.confluence
         )
 
 
