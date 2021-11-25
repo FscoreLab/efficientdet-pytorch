@@ -216,11 +216,11 @@ class DetBenchPredict(nn.Module):
         self.soft_nms = model.config.soft_nms
         self.predict_uncertainties = predict_uncertainties
         self.confluence = confluence
-        self.iou = kwargs['iou']
-        self.confluence_thr = kwargs['confluence_thr']
-        self.gaussian = kwargs['gaussian']
-        self.score_thr = kwargs['score_thr']
-        self.sigma = kwargs['sigma']
+        self.iou = kwargs['iou'] if 'iou' in kwargs else 0.5
+        self.confluence_thr = kwargs['confluence_thr'] if 'confluence_thr' in kwargs else 0.5
+        self.gaussian = kwargs['gaussian'] if 'gaussian' in kwargs else True
+        self.score_thr = kwargs['score_thr'] if 'score_thr' in kwargs else 0.05
+        self.sigma = kwargs['sigma'] if 'sigma' in kwargs else 0.5
 
     def forward(self, x, img_info: Optional[Dict[str, torch.Tensor]] = None):
         class_out, box_out = self.model(x)
