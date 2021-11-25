@@ -35,7 +35,7 @@ def create_model_from_config(
     labeler = kwargs.pop('bench_labeler', False)
 
     # create the base model
-    model = EfficientDet(config, pretrained_backbone=pretrained_backbone, **kwargs)
+    model = EfficientDet(config, pretrained_backbone=pretrained_backbone)
 
     # pretrained weights are always spec'd for original config, load them before we change the model
     if pretrained:
@@ -53,5 +53,5 @@ def create_model_from_config(
     if bench_task == 'train':
         model = DetBenchTrain(model, create_labeler=labeler, predict_uncertainties=predict_uncertainties)
     elif bench_task == 'predict':
-        model = DetBenchPredict(model, predict_uncertainties=predict_uncertainties, confluence=confluence)
+        model = DetBenchPredict(model, predict_uncertainties=predict_uncertainties, confluence=confluence, **kwargs)
     return model

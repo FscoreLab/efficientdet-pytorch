@@ -180,7 +180,10 @@ def generate_detections(
         box_uncertainty_ep: Optional[torch.Tensor],
         anchor_boxes, indices, classes,
         img_scale: Optional[torch.Tensor], img_size: Optional[torch.Tensor],
-        max_det_per_image: int = 100, soft_nms: bool = False, confluence=False,):
+        max_det_per_image: int = 100, soft_nms: bool = False, confluence=False,
+        iou=0.5, confluence_thr=0.5, gaussian=True, sigma=0.5,
+        score_thr=0.05,
+):
     """Generates detections with RetinaNet model outputs and anchors.
 
     Args:
@@ -228,13 +231,13 @@ def generate_detections(
             boxes, scores, classes, method_gaussian=True, iou_threshold=0.3, score_threshold=.001)
         scores[top_detection_idx] = soft_scores
     if not soft_nms and confluence:
-        top_detection_idx = confluence_nms(boxes.tolist(), scores.tolist(), classes.tolist(), gaussian=True,
-                                           confluence_thr=.5, sigma=0.5, score_thr=0.05)
+        top_detection_idx = confluence_nms(boxes.tolist(), scores.tolist(), classes.tolist(), gaussian=gaussian,
+                                           confluence_thr=confluence_thr, sigma=sigma, score_thr=score_thr)
         top_detection_idx = np.array(top_detection_idx[0])
         top_detection_idx = top_detection_idx[top_detection_idx[:, 4].argsort()[::-1]]
         top_detection_idx = torch.from_numpy(top_detection_idx).cuda()
     else:
-        top_detection_idx = batched_nms(boxes, scores, classes, iou_threshold=0.5)
+        top_detection_idx = batched_nms(boxes, scores, classes, iou_threshold=iou)
 
     # keep only top max_det_per_image scoring predictions
     top_detection_idx = top_detection_idx[:max_det_per_image]

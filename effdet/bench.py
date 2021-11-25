@@ -149,7 +149,7 @@ def _post_process(
     )
 
 
-@torch.jit.script
+# @torch.jit.script
 def _batch_detection(
     batch_size: int,
     class_out,
@@ -166,6 +166,11 @@ def _batch_detection(
     max_det_per_image: int = 100,
     soft_nms: bool = False,
     confluence: bool = False,
+    iou: float = 0.5,
+    confluence_thr: float = 0.5,
+    gaussian: float = True,
+    sigma: float = 0.5,
+    score_thr: float = 0.05,
 ):
     batch_detections = []
     # FIXME we may be able to do this as a batch with some tensor reshaping/indexing, PR welcome
@@ -186,14 +191,19 @@ def _batch_detection(
             img_size_i,
             max_det_per_image=max_det_per_image,
             soft_nms=soft_nms,
-            confluence=confluence
+            confluence=confluence,
+            iou=iou,
+            confluence_thr=confluence_thr,
+            gaussian=gaussian,
+            sigma=sigma,
+            score_thr=score_thr,
         )
         batch_detections.append(detections)
     return torch.stack(batch_detections, dim=0)
 
 
 class DetBenchPredict(nn.Module):
-    def __init__(self, model, predict_uncertainties=False, confluence=False):
+    def __init__(self, model, predict_uncertainties=False, confluence=False, **kwargs):
         super(DetBenchPredict, self).__init__()
         self.model = model
         self.config = model.config  # FIXME remove this when we can use @property (torchscript limitation)
@@ -206,6 +216,11 @@ class DetBenchPredict(nn.Module):
         self.soft_nms = model.config.soft_nms
         self.predict_uncertainties = predict_uncertainties
         self.confluence = confluence
+        self.iou = kwargs['iou']
+        self.confluence_thr = kwargs['confluence_thr']
+        self.gaussian = kwargs['gaussian']
+        self.score_thr = kwargs['score_thr']
+        self.sigma = kwargs['sigma']
 
     def forward(self, x, img_info: Optional[Dict[str, torch.Tensor]] = None):
         class_out, box_out = self.model(x)
@@ -237,7 +252,12 @@ class DetBenchPredict(nn.Module):
             img_size,
             max_det_per_image=self.max_det_per_image,
             soft_nms=self.soft_nms,
-            confluence=self.confluence
+            confluence=self.confluence,
+            iou=self.iou,
+            confluence_thr=self.confluence_thr,
+            gaussian=self.gaussian,
+            sigma=self.sigma,
+            score_thr=self.score_thr,
         )
 
 
