@@ -166,11 +166,11 @@ def _batch_detection(
     max_det_per_image: int = 100,
     soft_nms: bool = False,
     confluence: bool = False,
-    iou: float = 0.5,
+    iou_threshold: float = 0.5,
     confluence_thr: float = 0.5,
-    gaussian: float = True,
-    sigma: float = 0.5,
-    score_thr: float = 0.05,
+    confluence_gaussian: bool = True,
+    confluence_sigma: float = 0.5,
+    confluence_score_thr: float = 0.05,
 ):
     batch_detections = []
     # FIXME we may be able to do this as a batch with some tensor reshaping/indexing, PR welcome
@@ -192,11 +192,11 @@ def _batch_detection(
             max_det_per_image=max_det_per_image,
             soft_nms=soft_nms,
             confluence=confluence,
-            iou=iou,
+            iou_threshold=iou_threshold,
             confluence_thr=confluence_thr,
-            gaussian=gaussian,
-            sigma=sigma,
-            score_thr=score_thr,
+            confluence_gaussian=confluence_gaussian,
+            confluence_sigma=confluence_sigma,
+            confluence_score_thr=confluence_score_thr,
         )
         batch_detections.append(detections)
     return torch.stack(batch_detections, dim=0)
@@ -216,11 +216,11 @@ class DetBenchPredict(nn.Module):
         self.soft_nms = model.config.soft_nms
         self.predict_uncertainties = predict_uncertainties
         self.confluence = confluence
-        self.iou = kwargs['iou'] if 'iou' in kwargs else 0.5
+        self.iou_threshold = kwargs['iou_threshold'] if 'iou_threshold' in kwargs else 0.5
         self.confluence_thr = kwargs['confluence_thr'] if 'confluence_thr' in kwargs else 0.5
-        self.gaussian = kwargs['gaussian'] if 'gaussian' in kwargs else True
-        self.score_thr = kwargs['score_thr'] if 'score_thr' in kwargs else 0.05
-        self.sigma = kwargs['sigma'] if 'sigma' in kwargs else 0.5
+        self.confluence_gaussian = kwargs['confluence_gaussian'] if 'confluence_gaussian' in kwargs else True
+        self.confluence_score_thr = kwargs['confluence_score_thr'] if 'confluence_score_thr' in kwargs else 0.05
+        self.confluence_sigma = kwargs['confluence_sigma'] if 'confluence_sigma' in kwargs else 0.5
 
     def forward(self, x, img_info: Optional[Dict[str, torch.Tensor]] = None):
         class_out, box_out = self.model(x)
@@ -253,11 +253,11 @@ class DetBenchPredict(nn.Module):
             max_det_per_image=self.max_det_per_image,
             soft_nms=self.soft_nms,
             confluence=self.confluence,
-            iou=self.iou,
+            iou_threshold=self.iou_threshold,
             confluence_thr=self.confluence_thr,
-            gaussian=self.gaussian,
-            sigma=self.sigma,
-            score_thr=self.score_thr,
+            confluence_gaussian=self.confluence_gaussian,
+            confluence_sigma=self.confluence_sigma,
+            confluence_score_thr=self.confluence_score_thr,
         )
 
 
