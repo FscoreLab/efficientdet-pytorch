@@ -2,11 +2,8 @@
 
 Hacked together by Ross Wightman
 """
-
-from functools import partial
 from typing import Callable, Dict, List, Optional, Tuple
 
-import einops
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
@@ -19,29 +16,45 @@ from .loss import DetectionLoss
 
 def _sample_outputs(
     outputs: List[torch.Tensor], num_gmm: int, predict_uncertainties: bool
-) -> Tuple[List[torch.Tensor], List[Optional[torch.Tensor]], List[Optional[torch.Tensor]]]:
+) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     uncertainties_aleatoric = []
     uncertainties_epistemic = []
     for level in range(len(outputs)):
         mean, var, weights = torch.tensor_split(outputs[level].permute(0, 2, 3, 1), 3, dim=-1)
         var = torch.sigmoid(var)
-        weights = einops.rearrange(weights, "b h w (c k) -> b h w c k", k=num_gmm)
+        weights = weights.view(
+            weights.shape[0], weights.shape[1], weights.shape[2], weights.shape[3] // num_gmm, num_gmm
+        )
         weights = torch.softmax(weights, dim=-1)
-        weights = einops.rearrange(weights, "b h w c k -> b h w (c k)", k=num_gmm)
-        weighted_mean = einops.reduce(weights * mean, "b h w (c k) -> b h w c", "sum", k=num_gmm)
+        weights = weights.view(
+            weights.shape[0], weights.shape[1], weights.shape[2], weights.shape[3] * weights.shape[4]
+        )
+        weighted_mean = (
+            (weights * mean)
+            .view(weights.shape[0], weights.shape[1], weights.shape[2], weights.shape[3] // num_gmm, num_gmm)
+            .sum(-1)
+        )
         outputs[level] = weighted_mean
 
         if predict_uncertainties:
-            uncertainty_aleatoric = einops.reduce(weights * var, "b h w (c k) -> b h w c", "sum", k=num_gmm)
+            uncertainty_aleatoric = (
+                (weights * var)
+                .view(weights.shape[0], weights.shape[1], weights.shape[2], weights.shape[3] // num_gmm, num_gmm)
+                .sum(-1)
+            )
             uncertainties_aleatoric.append(uncertainty_aleatoric)
 
-            weighted_mean_repeated = einops.repeat(weighted_mean, "b h w c -> b h w (c k)", k=num_gmm)
+            weighted_mean_repeated = weighted_mean.repeat(1, 1, 1, num_gmm)
             mean_diff = (mean - weighted_mean_repeated).square()
-            uncertainty_epistemic = einops.reduce(weights * mean_diff, "b h w (c k) -> b h w c", "sum", k=num_gmm)
+            uncertainty_epistemic = (
+                (weights * mean_diff)
+                .view(weights.shape[0], weights.shape[1], weights.shape[2], weights.shape[3] // num_gmm, num_gmm)
+                .sum(-1)
+            )
             uncertainties_epistemic.append(uncertainty_epistemic)
         else:
-            uncertainties_aleatoric.append(None)
-            uncertainties_epistemic.append(None)
+            uncertainties_aleatoric.append(torch.zeros_like(weighted_mean))
+            uncertainties_epistemic.append(torch.zeros_like(weighted_mean))
 
     return outputs, uncertainties_aleatoric, uncertainties_epistemic
 
@@ -50,20 +63,39 @@ def _cat_outputs(outputs: List[torch.Tensor], batch_size: int, last_dim_size: in
     return torch.cat([output_level.reshape([batch_size, -1, last_dim_size]) for output_level in outputs], 1)
 
 
-def _post_process_uncertainties(
-    uncertainties: List[Optional[torch.Tensor]],
-    batch_size: int,
-    last_dim_size: int,
-    gather_func: Callable[[torch.Tensor], torch.Tensor],
-) -> List[Optional[torch.Tensor]]:
-    if uncertainties[0] is None:
-        return [None] * batch_size
-    uncertainties_all = _cat_outputs(uncertainties, batch_size, last_dim_size)
-    uncertainties_all_after_topk = gather_func(uncertainties_all)
-    uncertainties_reduced = einops.reduce(uncertainties_all_after_topk, "b n k -> b n 1", "max")
-    return uncertainties_reduced
+def _post_process_uncertainties_factory(gather_func: Callable[[torch.Tensor], torch.Tensor]):
+    def _post_process_uncertainties(
+        uncertainties: List[torch.Tensor],
+        batch_size: int,
+        last_dim_size: int,
+        indices_all: torch.Tensor,
+        classes_all: torch.Tensor,
+        num_classes: int = 0,
+    ) -> torch.Tensor:
+        uncertainties_all = _cat_outputs(uncertainties, batch_size, last_dim_size)
+        uncertainties_all_after_topk = gather_func(uncertainties_all, indices_all, classes_all, num_classes)
+        uncertainties_reduced = torch.max(uncertainties_all_after_topk, dim=-1, keepdim=True)[0]
+        return uncertainties_reduced
+
+    return _post_process_uncertainties
 
 
+def _gather_box_outputs(
+    outputs: torch.Tensor, indices_all: torch.Tensor, classes_all: torch.Tensor, num_classes: int = 0
+):
+    return torch.gather(outputs, 1, indices_all.unsqueeze(2).expand(-1, -1, 4))
+
+
+def _gather_cls_outputs(outputs: torch.Tensor, indices_all: torch.Tensor, classes_all: torch.Tensor, num_classes: int):
+    outputs_after_topk = torch.gather(outputs, 1, indices_all.unsqueeze(2).expand(-1, -1, num_classes))
+    return torch.gather(outputs_after_topk, 2, classes_all.unsqueeze(2))
+
+
+_post_process_uncertainties_boxes = _post_process_uncertainties_factory(_gather_box_outputs)
+_post_process_uncertainties_classes = _post_process_uncertainties_factory(_gather_cls_outputs)
+
+
+@torch.jit.script
 def _post_process(
     cls_outputs: List[torch.Tensor],
     box_outputs: List[torch.Tensor],
@@ -90,15 +122,6 @@ def _post_process(
         num_classes (int): number of output classes
     """
 
-    def _gather_box_outputs(outputs: torch.Tensor, indices_all: torch.Tensor):
-        return torch.gather(outputs, 1, indices_all.unsqueeze(2).expand(-1, -1, 4))
-
-    def _gather_cls_outputs(
-        outputs: torch.Tensor, indices_all: torch.Tensor, classes_all: torch.Tensor, num_classes: int
-    ):
-        outputs_after_topk = torch.gather(outputs, 1, indices_all.unsqueeze(2).expand(-1, -1, num_classes))
-        return torch.gather(outputs_after_topk, 2, classes_all.unsqueeze(2))
-
     batch_size = cls_outputs[0].shape[0]
 
     cls_outputs, cls_uncertainties_aleatoric, cls_uncertainties_epistemic = _sample_outputs(
@@ -115,26 +138,30 @@ def _post_process(
     indices_all = torch.div(cls_topk_indices_all, num_classes, rounding_mode="trunc")
     classes_all = cls_topk_indices_all % num_classes
 
-    box_outputs_all_after_topk = _gather_box_outputs(box_outputs_all, indices_all)
-    box_uncertainties_aleatoric_all_after_topk = _post_process_uncertainties(
-        box_uncertainties_aleatoric, batch_size, 4, partial(_gather_box_outputs, indices_all=indices_all)
+    box_outputs_all_after_topk = _gather_box_outputs(box_outputs_all, indices_all, classes_all)
+    box_uncertainties_aleatoric_all_after_topk = _post_process_uncertainties_boxes(
+        box_uncertainties_aleatoric, batch_size, 4, indices_all=indices_all, classes_all=classes_all
     )
-    box_uncertainties_epistemic_all_after_topk = _post_process_uncertainties(
-        box_uncertainties_epistemic, batch_size, 4, partial(_gather_box_outputs, indices_all=indices_all)
+    box_uncertainties_epistemic_all_after_topk = _post_process_uncertainties_boxes(
+        box_uncertainties_epistemic, batch_size, 4, indices_all=indices_all, classes_all=classes_all
     )
 
     cls_outputs_all_after_topk = _gather_cls_outputs(cls_outputs_all, indices_all, classes_all, num_classes)
-    cls_uncertainties_aleatoric_all_after_topk = _post_process_uncertainties(
+    cls_uncertainties_aleatoric_all_after_topk = _post_process_uncertainties_classes(
         cls_uncertainties_aleatoric,
         batch_size,
         num_classes,
-        partial(_gather_cls_outputs, indices_all=indices_all, classes_all=classes_all, num_classes=num_classes),
+        indices_all=indices_all,
+        classes_all=classes_all,
+        num_classes=num_classes,
     )
-    cls_uncertainties_epistemic_all_after_topk = _post_process_uncertainties(
+    cls_uncertainties_epistemic_all_after_topk = _post_process_uncertainties_classes(
         cls_uncertainties_epistemic,
         batch_size,
         num_classes,
-        partial(_gather_cls_outputs, indices_all=indices_all, classes_all=classes_all, num_classes=num_classes),
+        indices_all=indices_all,
+        classes_all=classes_all,
+        num_classes=num_classes,
     )
 
     return (
@@ -149,15 +176,15 @@ def _post_process(
     )
 
 
-# @torch.jit.script
+@torch.jit.script
 def _batch_detection(
     batch_size: int,
     class_out,
-    class_uncertainties_aleatoric: List[Optional[torch.Tensor]],
-    class_uncertainties_epistemic: List[Optional[torch.Tensor]],
+    class_uncertainties_aleatoric: torch.Tensor,
+    class_uncertainties_epistemic: torch.Tensor,
     box_out,
-    box_uncertainties_aleatoric: List[Optional[torch.Tensor]],
-    box_uncertainties_epistemic: List[Optional[torch.Tensor]],
+    box_uncertainties_aleatoric: torch.Tensor,
+    box_uncertainties_epistemic: torch.Tensor,
     anchor_boxes,
     indices,
     classes,
@@ -216,13 +243,13 @@ class DetBenchPredict(nn.Module):
         self.soft_nms = model.config.soft_nms
         self.predict_uncertainties = predict_uncertainties
         self.confluence = confluence
-        self.iou_threshold = kwargs['iou_threshold'] if 'iou_threshold' in kwargs else 0.5
-        self.confluence_thr = kwargs['confluence_thr'] if 'confluence_thr' in kwargs else 0.5
-        self.confluence_gaussian = kwargs['confluence_gaussian'] if 'confluence_gaussian' in kwargs else True
-        self.confluence_score_thr = kwargs['confluence_score_thr'] if 'confluence_score_thr' in kwargs else 0.05
-        self.confluence_sigma = kwargs['confluence_sigma'] if 'confluence_sigma' in kwargs else 0.5
+        self.iou_threshold = kwargs["iou_threshold"] if "iou_threshold" in kwargs else 0.5
+        self.confluence_thr = kwargs["confluence_thr"] if "confluence_thr" in kwargs else 0.5
+        self.confluence_gaussian = kwargs["confluence_gaussian"] if "confluence_gaussian" in kwargs else True
+        self.confluence_score_thr = kwargs["confluence_score_thr"] if "confluence_score_thr" in kwargs else 0.05
+        self.confluence_sigma = kwargs["confluence_sigma"] if "confluence_sigma" in kwargs else 0.5
 
-    def forward(self, x, img_info: Optional[Dict[str, torch.Tensor]] = None):
+    def forward(self, x, img_scale: Optional[torch.Tensor] = None, img_size: Optional[torch.Tensor] = None):
         class_out, box_out = self.model(x)
         class_out, cls_un_al, cls_un_ep, box_out, box_un_al, box_un_ep, indices, classes = _post_process(
             class_out,
@@ -233,10 +260,6 @@ class DetBenchPredict(nn.Module):
             num_gmm=self.num_gmm,
             predict_uncertainties=self.predict_uncertainties,
         )
-        if img_info is None:
-            img_scale, img_size = None, None
-        else:
-            img_scale, img_size = img_info["img_scale"], img_info["img_size"]
         return _batch_detection(
             x.shape[0],
             class_out,
