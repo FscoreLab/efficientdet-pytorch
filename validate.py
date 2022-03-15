@@ -163,10 +163,17 @@ def validate(args):
     last_idx = len(loader) - 1
     with torch.no_grad():
         for i, (input, target) in enumerate(loader):
+            print(f'input: {input}')
+            print(f'target: {target}')
+            # break
             with amp_autocast():
                 output = bench(input, img_info=target)
+            print(f'output: {output}')
+            print(f'output cls: {output[:, :, -1]}')
+            # output[:, :, -1] = torch.where((output[:, :, -1] == 27) | (output[:, :, -1] == 28) |
+            #                                (output[:, :, -1] == 31) | (output[:, :, -1] == 33), 1, 0)
             evaluator.add_predictions(output, target)
-
+            break
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()

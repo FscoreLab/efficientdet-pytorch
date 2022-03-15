@@ -233,12 +233,16 @@ def main():
     setup_default_logging()
     args, args_text = _parse_args()
 
+    args.root = '/home/boris/Markin/prj/efficientdet-pytorch/bags'
+    args.dataset = 'coco2014'
+    args.DIR = '/home/boris/Markin/prj/efficientdet-pytorch/bags'
+
     project_name = "Pochta/VIDEOANAL_detection"
-    task_name = "crowd_human_efficientdet_d3_gmm_1"
-    output_uri = (
-        "s3://astralai-trains/videoanal/efficientdet"  # path for saving models (torch.save) with clearml hooks
-    )
-    Task.init(project_name=project_name, task_name=task_name, output_uri=output_uri)
+    task_name = "bag_detection_effdet_d3"
+    # output_uri = (
+    #     "s3://astralai-trains/videoanal/efficientdet"  # path for saving models (torch.save) with clearml hooks
+    # )
+    # Task.init(project_name=project_name, task_name=task_name)
 
     args.pretrained_backbone = not args.no_pretrained_backbone
     args.prefetcher = not args.no_prefetcher
@@ -300,7 +304,7 @@ def main():
             soft_nms=args.soft_nms,
             bench_labeler=args.bench_labeler,
             checkpoint_path=args.initial_checkpoint,
-            image_size=(512, 768),
+            image_size=(256, 256),
         )
     model_config = model.config  # grab before we obscure with DP/DDP wrappers
 
@@ -482,6 +486,7 @@ def create_datasets_and_loaders(
         transform_eval_fn=None,
         collate_fn=None,
 ):
+    from PIL import Image
     """ Setup datasets, transforms, loaders, evaluator.
 
     Args:
@@ -497,12 +502,18 @@ def create_datasets_and_loaders(
     input_config = resolve_input_config(args, model_config=model_config)
 
     dataset_train, dataset_eval = create_dataset(args.dataset, args.root)
+    print(f'dataset_train: {dataset_train.__getitem__(0)}')
+    print(f'dataset_eval: {dataset_eval.__getitem__(0)}')
+    dataset_eval.__getitem__(0)[0].show()
+
 
     # setup labeler in loader/collate_fn if not enabled in the model bench
     labeler = None
     if not args.bench_labeler:
         labeler = AnchorLabeler(
             Anchors.from_config(model_config), model_config.num_classes, match_threshold=0.5)
+    print(f'input_size: {input_config["input_size"]}')
+    print(f'model config: {model_config}')
 
     loader_train = create_loader(
         dataset_train,
@@ -573,6 +584,12 @@ def train_epoch(
     last_idx = len(loader) - 1
     num_updates = epoch * len(loader)
     for batch_idx, (input, target) in enumerate(loader):
+        print('shapes:', input.shape, target['img_size'].shape, target['img_idx'].shape, target['label_cls_0'].shape,
+              target['label_bbox_0'].shape, target['label_cls_1'].shape, target['label_bbox_1'].shape)
+        print(target['img_size'], target['img_scale'])
+        print('target keys', target.keys())
+        print('input shape', input.shape)
+        # break
         if epoch % 5 == 0 and batch_idx == 0:
             writer.add_images("samples/train", denorm_images(input), global_step=epoch)
             
@@ -585,6 +602,8 @@ def train_epoch(
         with amp_autocast():
             output = model(input, target)
         loss = output['loss']
+        # print(output.keys())
+        break
 
         if not args.distributed:
             losses_m.update(loss.item(), input.size(0))
@@ -683,7 +702,8 @@ def validate(writer, epoch, model, loader, args, evaluator=None, log_suffix=''):
                     images[i] = torchvision.utils.draw_bounding_boxes(images[i], boxes, colors=[(255, 0, 0)] * len(boxes))
                 writer.add_images("samples/valid", images, global_step=epoch)
 
-
+            # print(f'output: {output["detections"][0]}')
+            # print(f'target: {target}')
             if evaluator is not None:
                 evaluator.add_predictions(output['detections'], target)
 

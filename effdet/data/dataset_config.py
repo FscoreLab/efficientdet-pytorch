@@ -11,7 +11,7 @@ from typing import Dict
 class CocoCfg:
     variant: str = None
     parser: str = 'coco'
-    num_classes: int = 80
+    num_classes: int = 1
     splits: Dict[str, dict] = None
 
 @dataclass
@@ -34,15 +34,24 @@ class Coco2017Cfg(CocoCfg):
     ))
 
 
+# @dataclass
+# class Coco2014Cfg(CocoCfg):
+#     variant: str = '2014'
+#     splits: Dict[str, dict] = field(default_factory=lambda: dict(
+#         train=dict(ann_filename='annotations/instances_train2014.json', img_dir='train2014', has_labels=True),
+#         val=dict(ann_filename='annotations/instances_val2014.json', img_dir='val2014', has_labels=True),
+#         test=dict(ann_filename='', img_dir='test2014', has_labels=False),
+#     ))
+
+
 @dataclass
 class Coco2014Cfg(CocoCfg):
     variant: str = '2014'
     splits: Dict[str, dict] = field(default_factory=lambda: dict(
-        train=dict(ann_filename='annotations/instances_train2014.json', img_dir='train2014', has_labels=True),
-        val=dict(ann_filename='annotations/instances_val2014.json', img_dir='val2014', has_labels=True),
-        test=dict(ann_filename='', img_dir='test2014', has_labels=False),
+        train=dict(ann_filename='annotations/train.json', img_dir='img/train', has_labels=True),
+        val=dict(ann_filename='annotations/val.json', img_dir='img/val', has_labels=True),
+        # test=dict(ann_filename='', img_dir='test2014', has_labels=False),
     ))
-
 
 @dataclass
 class VocCfg:

@@ -22,15 +22,20 @@ class CocoParser(Parser):
         self.cat_ids_as_labels = True  # this is the default for original TF EfficientDet models
         self.coco = None
         self._load_annotations(cfg.ann_filename)
+        # print(f'self.coco.dataset["annotations"]: {self.coco.dataset["annotations"]}')
 
     def get_ann_info(self, idx):
         img_id = self.img_ids[idx]
+        # print(f'self.img_ids: {self.img_ids}')
+        # print(f'img_id: {img_id}')
         return self._parse_img_ann(img_id)
 
     def _load_annotations(self, ann_file):
         assert self.coco is None
         self.coco = COCO(ann_file)
+        # print(f'self.coco: {self.coco.dataset}')
         self.cat_ids = self.coco.getCatIds()
+        # print(f'self.cat_ids: {self.cat_ids}')
         self.cat_names = [c['name'] for c in self.coco.loadCats(ids=self.cat_ids)]
         if not self.cat_ids_as_labels:
             self.cat_id_to_label = {cat_id: i + self.label_offset for i, cat_id in enumerate(self.cat_ids)}
@@ -47,6 +52,8 @@ class CocoParser(Parser):
     def _parse_img_ann(self, img_id):
         ann_ids = self.coco.getAnnIds(imgIds=[img_id])
         ann_info = self.coco.loadAnns(ann_ids)
+        # print(f'ann_ids: {ann_ids}')
+        # print(f'ann_info: {ann_info}')
         bboxes = []
         bboxes_ignore = []
         cls = []

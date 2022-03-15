@@ -101,7 +101,8 @@ def _post_process(
     box_outputs_all = _cat_outputs(box_outputs, batch_size, 4)
 
     _, cls_topk_indices_all = torch.topk(cls_outputs_all.reshape(batch_size, -1), dim=1, k=max_detection_points)
-    indices_all = cls_topk_indices_all // num_classes
+    # indices_all = cls_topk_indices_all // num_classes
+    indices_all = torch.div(cls_topk_indices_all, num_classes, rounding_mode='floor')
     classes_all = cls_topk_indices_all % num_classes
 
     box_outputs_all_after_topk = _gather_box_outputs(box_outputs_all, indices_all)
@@ -207,6 +208,7 @@ class DetBenchTrain(nn.Module):
         self.predict_uncertainties = predict_uncertainties
 
     def forward(self, x, target: Dict[str, torch.Tensor]):
+        # print(x.shape, target)
         class_out, box_out = self.model(x)
         if self.anchor_labeler is None:
             # target should contain pre-computed anchor labels if labeler not present in bench
@@ -217,7 +219,9 @@ class DetBenchTrain(nn.Module):
         else:
             cls_targets, box_targets, num_positives = self.anchor_labeler.batch_label_anchors(
                 target['bbox'], target['cls'])
-
+        for i in range(5):
+            print('class targets: ', cls_targets[i].shape)
+            print('class out: ', class_out[i].shape)
         loss, class_loss, box_loss = self.loss_fn(class_out, box_out, cls_targets, box_targets, num_positives)
         output = {'loss': loss, 'class_loss': class_loss, 'box_loss': box_loss}
         if not self.training:

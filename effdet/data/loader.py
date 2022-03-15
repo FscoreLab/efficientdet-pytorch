@@ -36,6 +36,7 @@ class DetectionFastCollate:
         self.anchor_labeler = anchor_labeler
 
     def __call__(self, batch):
+        # print(batch)
         batch_size = len(batch)
         target = dict()
         labeler_outputs = dict()
@@ -80,6 +81,7 @@ class DetectionFastCollate:
                     target_tensor[i] = torch.tensor(tv, dtype=target_tensor.dtype)
 
             if self.anchor_labeler is not None:
+                # print('if self.anchor_labeler is not None', labeler_inputs['bbox'], labeler_inputs['cls'])
                 cls_targets, box_targets, num_positives = self.anchor_labeler.label_anchors(
                     labeler_inputs['bbox'], labeler_inputs['cls'], filter_valid=False)
                 if i == 0:
@@ -96,7 +98,11 @@ class DetectionFastCollate:
                 labeler_outputs['label_num_positives'][i] = num_positives
         if labeler_outputs:
             target.update(labeler_outputs)
-
+        for i in range(5):
+            print('label_cls_', labeler_outputs[f'label_cls_{i}'].shape)
+            print('label_bbox_', labeler_outputs[f'label_bbox_{i}'].shape)
+        print()
+        print(f'tensor shape: {img_tensor.shape}')
         return img_tensor, target
 
 

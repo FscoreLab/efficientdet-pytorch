@@ -89,6 +89,7 @@ class ResizePad:
         img_scale_y = self.target_size[0] / height
         img_scale_x = self.target_size[1] / width
         img_scale = min(img_scale_y, img_scale_x)
+        # print('pad', img.size, ' ', self.target_size, img_scale)
         scaled_h = int(height * img_scale)
         scaled_w = int(width * img_scale)
 

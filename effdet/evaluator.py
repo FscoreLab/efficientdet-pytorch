@@ -104,6 +104,7 @@ class CocoEvaluator(Evaluator):
             results = self.coco_api.loadRes('./temp.json')
             coco_eval = COCOeval(self.coco_api, results, 'bbox')
             coco_eval.params.imgIds = coco_ids  # score only ids we've used
+            print('areaRng:', coco_eval.params.areaRng)
             coco_eval.evaluate()
             coco_eval.accumulate()
             coco_eval.summarize()
