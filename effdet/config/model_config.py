@@ -29,8 +29,12 @@ def default_detection_model_configs():
     h.num_classes = 90
 
     # feature + anchor config
-    h.min_level = 3
-    h.max_level = 7
+    # h.min_level = 3
+    # h.max_level = 7
+    ###
+    h.min_level = 1
+    h.max_level = 5
+    ###
     h.num_levels = h.max_level - h.min_level + 1
     h.num_scales = 3
     h.aspect_ratios = [(1.0, 1.0), (1.4, 0.7), (0.7, 1.4)]
@@ -616,7 +620,7 @@ efficientdet_model_param_dict = dict(
     ),
 
     # The lite configs are in TF automl repository but no weights yet and listed as 'not final'
-    tf_efficientdet_lite0=dict(
+    tf_efficientdet_lite0tf_efficientdet_lite0=dict(
         name='tf_efficientdet_lite0',
         backbone_name='tf_efficientnet_lite0',
         image_size=(512, 512),

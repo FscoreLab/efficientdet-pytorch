@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from typing import Optional, List, Tuple
+from torch.nn import BCEWithLogitsLoss
 
 
 def _sample_outputs(outputs: torch.Tensor, num_gmm: int) -> torch.Tensor:
@@ -278,5 +279,120 @@ class DetectionLoss(nn.Module):
 
         return l_fn(
             cls_outputs, box_outputs, cls_targets, box_targets, num_positives,
+            num_classes=self.num_classes, num_gmm=self.num_gmm, alpha=self.alpha, gamma=self.gamma, delta=self.delta,
+            box_loss_weight=self.box_loss_weight, label_smoothing=self.label_smoothing, legacy_focal=self.legacy_focal)
+
+def loss_mask(
+        cls_outputs: List[torch.Tensor],
+        box_outputs: List[torch.Tensor],
+        cls_targets: List[torch.Tensor],
+        box_targets: List[torch.Tensor],
+        mask_outputs: torch.Tensor,
+        mask_targets: torch.Tensor,
+        num_positives: torch.Tensor,
+        num_classes: int,
+        num_gmm: int,
+        alpha: float,
+        gamma: float,
+        delta: float,
+        box_loss_weight: float,
+        label_smoothing: float = 0.,
+        legacy_focal: bool = False,  # False
+        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Computes total detection loss.
+    Computes total detection loss including box and class loss from all levels.
+    Args:
+        cls_outputs: a List with values representing logits in [batch_size, height, width, num_anchors].
+            at each feature level (index)
+
+        box_outputs: a List with values representing box regression targets in
+            [batch_size, height, width, num_anchors * 4] at each feature level (index)
+
+        cls_targets: groundtruth class targets.
+
+        box_targets: groundtrusth box targets.
+
+        num_positives: num positive grountruth anchors
+
+    Returns:
+        total_loss: an integer tensor representing total loss reducing from class and box losses from all levels.
+
+        cls_loss: an integer tensor representing total class loss.
+
+        box_loss: an integer tensor representing total box regression loss.
+    """
+    # Sum all positives in a batch for normalization and avoid zero
+    # num_positives_sum, which would lead to inf loss during training
+    num_positives_sum = (num_positives.sum() + 1.0).float()
+    levels = len(cls_outputs)
+
+    cls_losses = []
+    box_losses = []
+    mask_bce = BCEWithLogitsLoss()
+    for l in range(levels):
+        cls_targets_at_level = cls_targets[l]
+        box_targets_at_level = box_targets[l]
+
+        # Onehot encoding for classification labels.
+        cls_targets_at_level_oh = one_hot(cls_targets_at_level, num_classes)
+
+        bs, height, width, _, _ = cls_targets_at_level_oh.shape
+        cls_targets_at_level_oh = cls_targets_at_level_oh.view(bs, height, width, -1)
+        cls_outputs_at_level = cls_outputs[l].permute(0, 2, 3, 1).float()
+        if legacy_focal:
+            cls_loss = focal_loss_legacy(
+                cls_outputs_at_level, cls_targets_at_level_oh,
+                alpha=alpha, gamma=gamma, normalizer=num_positives_sum)
+        else:
+            cls_loss = new_focal_loss(
+                cls_outputs_at_level, cls_targets_at_level_oh, num_gmm=num_gmm,
+                alpha=alpha, gamma=gamma, normalizer=num_positives_sum, label_smoothing=label_smoothing)
+        cls_loss = cls_loss.view(bs, height, width, -1, num_classes)
+        cls_loss = cls_loss * (cls_targets_at_level != -2).unsqueeze(-1)
+        cls_losses.append(cls_loss.sum())   # FIXME reference code added a clamp here at some point ...clamp(0, 2))
+
+        box_losses.append(_box_loss(
+            box_outputs[l].permute(0, 2, 3, 1).float(),
+            box_targets_at_level,
+            num_positives_sum,
+            num_gmm=num_gmm,
+            delta=delta))
+
+    # Sum per level losses to total loss.
+    cls_loss = torch.sum(torch.stack(cls_losses, dim=-1), dim=-1)
+    box_loss = torch.sum(torch.stack(box_losses, dim=-1), dim=-1)
+    # mask_loss = mask_bce(mask_outputs, mask_targets.float())
+    total_loss = cls_loss + box_loss_weight * box_loss # + mask_loss
+
+    return total_loss, cls_loss, box_loss # , mask_loss
+
+
+class MaskDetectionLoss(nn.Module):
+    __constants__ = ['num_classes']
+
+    def __init__(self, config):
+        super(MaskDetectionLoss, self).__init__()
+        self.config = config
+        self.num_classes = config.num_classes
+        self.num_gmm = config.gaussian_count
+        self.alpha = config.alpha
+        self.gamma = config.gamma
+        self.delta = config.delta
+        self.box_loss_weight = config.box_loss_weight
+        self.label_smoothing = config.label_smoothing
+        self.legacy_focal = config.legacy_focal
+        self.use_jit = config.jit_loss
+
+    def forward(
+            self,
+            cls_outputs: List[torch.Tensor],
+            box_outputs: List[torch.Tensor],
+            cls_targets: List[torch.Tensor],
+            box_targets: List[torch.Tensor],
+            mask_outputs: torch.Tensor,
+            mask_targets: torch.Tensor,
+            num_positives: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return loss_mask(
+            cls_outputs, box_outputs, cls_targets, box_targets, mask_outputs, mask_targets, num_positives,
             num_classes=self.num_classes, num_gmm=self.num_gmm, alpha=self.alpha, gamma=self.gamma, delta=self.delta,
             box_loss_weight=self.box_loss_weight, label_smoothing=self.label_smoothing, legacy_focal=self.legacy_focal)
