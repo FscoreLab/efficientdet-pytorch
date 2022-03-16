@@ -364,7 +364,7 @@ def loss_mask(
     # mask_loss = mask_bce(mask_outputs, mask_targets.float())
     total_loss = cls_loss + box_loss_weight * box_loss # + mask_loss
 
-    return total_loss, cls_loss, box_loss # , mask_loss
+    return total_loss, cls_loss, box_loss_weight * box_loss # , mask_loss
 
 
 class MaskDetectionLoss(nn.Module):
