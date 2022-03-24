@@ -282,6 +282,7 @@ class DetectionLoss(nn.Module):
             num_classes=self.num_classes, num_gmm=self.num_gmm, alpha=self.alpha, gamma=self.gamma, delta=self.delta,
             box_loss_weight=self.box_loss_weight, label_smoothing=self.label_smoothing, legacy_focal=self.legacy_focal)
 
+
 def loss_mask(
         cls_outputs: List[torch.Tensor],
         box_outputs: List[torch.Tensor],
@@ -361,10 +362,13 @@ def loss_mask(
     # Sum per level losses to total loss.
     cls_loss = torch.sum(torch.stack(cls_losses, dim=-1), dim=-1)
     box_loss = torch.sum(torch.stack(box_losses, dim=-1), dim=-1)
-    # mask_loss = mask_bce(mask_outputs, mask_targets.float())
-    total_loss = cls_loss + box_loss_weight * box_loss # + mask_loss
-
-    return total_loss, cls_loss, box_loss_weight * box_loss # , mask_loss
+    if mask_outputs is None:
+        total_loss = cls_loss + box_loss_weight * box_loss
+        return total_loss, cls_loss, box_loss_weight * box_loss, None
+    else:
+        mask_loss = mask_bce(mask_outputs, mask_targets.float())
+        total_loss = cls_loss + box_loss_weight * box_loss + mask_loss
+        return total_loss, cls_loss, box_loss_weight * box_loss, mask_loss
 
 
 class MaskDetectionLoss(nn.Module):

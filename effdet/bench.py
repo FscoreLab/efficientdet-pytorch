@@ -7,7 +7,6 @@ from functools import partial
 from typing import Callable, Dict, List, Optional, Tuple
 from collections import defaultdict
 import einops
-# from pyrsistent import T<
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
@@ -201,9 +200,12 @@ def _batch_detection(
             confluence_score_thr=confluence_score_thr,
         )
         batch_detections.append(detections)
+    if mask is not None:
+        mask = torch.sigmoid(mask)
+        mask = torch.where(mask > .5, 1, 0)
     return torch.stack(batch_detections, dim=0), mask
 
-def dets_to_dict(dets: torch.tensor, mask: torch.tensor) -> List[dict]:
+def dets_to_dict(dets: torch.tensor, mask: torch.tensor, confidence_thresh: float = .5) -> List[dict]:
     batch_size = dets.shape[0]
     out_list = []
     for i in range(batch_size):
@@ -211,16 +213,22 @@ def dets_to_dict(dets: torch.tensor, mask: torch.tensor) -> List[dict]:
             'boxes': dets[i, :, :4],
             'labels': dets[i, :, 5],
             'scores': dets[i, :, 4],
-            # 'masks': mask[i],
         }
         out_list.append(d)
-    return out_list
+    outputs = [{'boxes': out_list[i]['boxes'][out_list[i]['scores'] > confidence_thresh],
+        'labels': out_list[i]['labels'][out_list[i]['scores'] > confidence_thresh],
+        'scores': out_list[i]['scores'][out_list[i]['scores'] > confidence_thresh]} for i in range(len(out_list))]
+    if mask is not None:
+        for i in range(len(out_list)):
+            outputs[i]['masks'] = mask[i]
+    return outputs
 
 class DetBenchPredict(nn.Module):
-    def __init__(self, model, predict_uncertainties=False, confluence=False, **kwargs):
+    def __init__(self, model, predict_uncertainties=False, confluence=False, confidence_thresh=.5, **kwargs):
         super(DetBenchPredict, self).__init__()
         self.model = model
         self.config = model.config  # FIXME remove this when we can use @property (torchscript limitation)
+        self.use_segm_branch = model.use_segm_branch
         self.num_levels = model.config.num_levels
         self.num_classes = model.config.num_classes
         self.num_gmm = model.config.gaussian_count
@@ -228,6 +236,7 @@ class DetBenchPredict(nn.Module):
         self.max_detection_points = model.config.max_detection_points
         self.max_det_per_image = model.config.max_det_per_image
         self.soft_nms = model.config.soft_nms
+        self.confidence_thresh = confidence_thresh
         self.predict_uncertainties = predict_uncertainties
         self.confluence = confluence
         self.iou_threshold = kwargs['iou_threshold'] if 'iou_threshold' in kwargs else 0.5
@@ -237,9 +246,11 @@ class DetBenchPredict(nn.Module):
         self.confluence_sigma = kwargs['confluence_sigma'] if 'confluence_sigma' in kwargs else 0.5
 
     def forward(self, x, img_info: Optional[Dict[str, torch.Tensor]] = None):
-        # class_out, box_out, segm_out = self.model(x)
-        class_out, box_out = self.model(x)
-        segm_out = None
+        if self.use_segm_branch:
+            class_out, box_out, segm_out = self.model(x)
+        else:
+            class_out, box_out = self.model(x)
+            segm_out = None
         class_out, cls_un_al, cls_un_ep, box_out, box_un_al, box_un_ep, indices, classes = _post_process(
             class_out,
             box_out,
@@ -276,7 +287,7 @@ class DetBenchPredict(nn.Module):
             confluence_sigma=self.confluence_sigma,
             confluence_score_thr=self.confluence_score_thr,
         )
-        return dets_to_dict(dets=dets, mask=masks)
+        return dets_to_dict(dets=dets, mask=masks, confidence_thresh=self.confidence_thresh)
 
 
 class DetBenchTrain(nn.Module):
@@ -284,6 +295,7 @@ class DetBenchTrain(nn.Module):
         super(DetBenchTrain, self).__init__()
         self.model = model
         self.config = model.config  # FIXME remove this when we can use @property (torchscript limitation)
+        self.use_segm_branch = model.use_segm_branch
         self.num_levels = model.config.num_levels
         self.num_classes = model.config.num_classes
         self.num_gmm = model.config.gaussian_count
@@ -294,79 +306,60 @@ class DetBenchTrain(nn.Module):
         self.anchor_labeler = None
         if create_labeler:
             self.anchor_labeler = AnchorLabeler(self.anchors, self.num_classes, match_threshold=0.5)
-        # self.loss_fn = DetectionLoss(model.config)
-        self.loss_fn = MaskDetectionLoss(model.config)
+        self.loss_fn = MaskDetectionLoss(model.config)  # works with and without mask branch
         self.predict_uncertainties = predict_uncertainties
 
-    def preprocess_target(self, x: List[torch.Tensor], target: List[Dict]):
+    def preprocess_target_2(self, x: List[torch.Tensor], target: List[Dict]):
         out_target = defaultdict()
-        out_target['img_idx'] = []
-        # out_target['masks'] = []
+        max_num_instances = 10
+        out_target['masks'] = []
         inds_to_take = []
         # define number of valid rows
         for i in range(len(target)):
             if target[i]['boxes'].shape[0] != 0:
                 inds_to_take.append(i)
         batch_size = len(inds_to_take)
-        out_x = []
-        for seq_num, i in enumerate(inds_to_take):
-            out_x.append(x[i])
-            out_target['img_idx'].append(target[i]['ids'])
-            cls_targets, box_targets, num_positives = self.anchor_labeler.label_anchors(
-                target[i]['boxes'], target[i]['labels'], filter_valid=False)
-            if seq_num == 0:
-                # first batch elem, create destination tensors, separate key per level
-                for j, (ct, bt) in enumerate(zip(cls_targets, box_targets)):
-                    out_target[f'label_cls_{j}'] = torch.zeros(
-                        (batch_size,) + ct.shape, dtype=torch.int64, device='cuda')
-                    out_target[f'label_bbox_{j}'] = torch.zeros(
-                        (batch_size,) + bt.shape, dtype=torch.float32, device='cuda')
-                out_target['label_num_positives'] = torch.zeros(batch_size)
-            for j, (ct, bt) in enumerate(zip(cls_targets, box_targets)):
-                out_target[f'label_cls_{j}'][seq_num] = ct
-                out_target[f'label_bbox_{j}'][seq_num] = bt
-            out_target['label_num_positives'][seq_num] = num_positives
-            # if len(target[i]['masks'].shape) > 2:
-            #     out_target['masks'].append(torch.sum(target[i]['masks'], dim=0))
-            # else:
-            #     out_target['masks'].append(target[i]['masks'])
-        out_x = torch.stack(out_x)
-        # out_target['masks'] = torch.stack(out_target['masks']).unsqueeze(1).cuda()
-        out_target['img_idx'] = torch.tensor(out_target['img_idx']).cuda()
-        out_target['label_num_positives'] = out_target['label_num_positives'].cuda()
-        return out_x, out_target
+        out_target = {
+            'boxes': torch.ones((batch_size, max_num_instances, 4), device='cuda')*(-1.0),
+            'labels':  torch.ones((batch_size, max_num_instances), device='cuda')*(-1),
+            'image_id': torch.ones((batch_size,), device='cuda'),
+            'masks': []}
+
+        img_tensor = []
+        for i, ind in enumerate(inds_to_take):
+            img_tensor.append(x[ind])
+            for j, tens in enumerate(target[ind]['boxes']):
+                out_target['boxes'][i][j] = tens
+            out_target['labels'][i][:target[ind]['labels'].shape[0]] = target[ind]['labels']
+
+            out_target['image_id'][i] = target[ind]['image_id']
+            if len(target[ind]['masks'].shape) > 2: # more than 1 mask
+                out_target['masks'].append(torch.sum(target[ind]['masks'], dim=0))
+            else:
+                out_target['masks'].append(target[ind]['masks'])
+        img_tensor = torch.stack(img_tensor)
+        out_target['masks'] = torch.stack(out_target['masks']).unsqueeze(1)
+        return img_tensor, out_target
 
     def forward(self, x, target: Dict[str, torch.Tensor]):
-        x, target = self.preprocess_target(x, target)
-        # todo: target is almost done (add a couple of keys); transform x from list to tensor
-        # class_out, box_out, mask_out = self.model(x)  # added mask_out
-        ###
-        class_out, box_out = self.model(x)  # added mask_out
-        mask_out = None
-        ###
-        # if self.anchor_labeler is None:
-        #     # target should contain pre-computed anchor labels if labeler not present in bench
-        #     assert "label_num_positives" in target
-        #     cls_targets = [target[f"label_cls_{l}"] for l in range(self.num_levels)]
-        #     box_targets = [target[f"label_bbox_{l}"] for l in range(self.num_levels)]
-        #     num_positives = target["label_num_positives"]
-        # else:
-        #     cls_targets, box_targets, num_positives = self.anchor_labeler.batch_label_anchors(
-        #         target["bbox"], target["cls"]
-        #     )
-        cls_targets = [target[f"label_cls_{l}"] for l in range(self.num_levels)]
-        box_targets = [target[f"label_bbox_{l}"] for l in range(self.num_levels)]
-        num_positives = target["label_num_positives"]
-        # loss, class_loss, box_loss, mask_loss = self.loss_fn(class_out, box_out, cls_targets, box_targets, mask_out,
-        #                                                      target['masks'], num_positives)
-        loss, class_loss, box_loss = self.loss_fn(class_out, box_out, cls_targets, box_targets, mask_out,
-                                                             None, # target['masks'],
+        x, target = self.preprocess_target_2(x, target)
+        if self.use_segm_branch:
+            class_out, box_out, segm_out = self.model(x)
+            segm_target = target['masks']
+        else:
+            class_out, box_out = self.model(x)
+            segm_out, segm_target = None, None
+        cls_targets, box_targets, num_positives = self.anchor_labeler.batch_label_anchors(
+                target["boxes"], target["labels"]
+            )
+        loss, class_loss, box_loss, mask_loss = self.loss_fn(class_out, box_out, cls_targets, box_targets, segm_out,
+                                                             segm_target, # target['masks'],
                                                              num_positives)
-        # need mask targets
-        output = {"loss": loss,
-        "class_loss": class_loss,
-        "box_loss": box_loss,
-        # "mask_loss": mask_loss
+        output = {
+            "loss": loss,
+            "class_loss": class_loss,
+            "box_loss": box_loss,
+            "mask_loss": mask_loss
         }
         if not self.training:
             # if eval mode, output detections for evaluation
@@ -419,188 +412,3 @@ def weights_init_classifier(m):
         nn.init.normal_(m.weight, std=0.001)
         if m.bias:
             nn.init.constant_(m.bias, 0.0)
-
-
-class ReidBench(nn.Module):
-    def __init__(self, model, num_classes, neck, neck_feat, features_dim):
-
-        super(ReidBench, self).__init__()
-        self.base = model
-        self.gap = nn.AdaptiveMaxPool2d(1)
-        self.num_classes = num_classes
-        self.neck = neck
-        self.neck_feat = neck_feat
-        self.in_planes = features_dim
-        config = dict(self.base.config)
-        config["num_scales"] = 1
-        config["num_levels"] = 1
-        config["aspect_ratios"] = [(1.0, 1.0)]
-        config["fpn_channels"] = 1280
-        eba_config = OmegaConf.create()
-        eba_config.update(config)
-        self.fuse_backbone_1 = nn.Sequential(nn.Conv2d(384, 256, 3, 1, 1), nn.BatchNorm2d(256))
-        self.fuse_backbone_2 = nn.Sequential(
-            nn.Conv2d(136, 256, 3, 2, 1), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256)
-        )
-        self.fuse_1_1 = nn.Sequential(
-            nn.Conv2d(self.base.config.fpn_channels, 256, 3, 2, 1),
-            nn.Conv2d(256, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
-        )
-        self.fuse_1_2 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, 1, 1), nn.BatchNorm2d(256))
-        self.fuse_1_4 = nn.Sequential(
-            nn.ConvTranspose2d(self.base.config.fpn_channels, 256, 2, 2, 0, 0),
-            nn.Conv2d(256, 256, 3, padding=1),
-            nn.BatchNorm2d(256),
-        )
-        self.fuse_1_3 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, 1, 1), nn.BatchNorm2d(256))
-
-        self.fuse_1 = nn.Sequential(
-            nn.Conv2d(512, 256, 3, 2, 1), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256)
-        )
-        self.fuse_2 = nn.Sequential(nn.Conv2d(self.base.config.fpn_channels, 256, 3, padding=1), nn.BatchNorm2d(256))
-        self.fuse_3 = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, 2, 2, 0, 0), nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256)
-        )
-        self.feature_head = HeadNet(eba_config, self.in_planes)
-
-        if self.neck == "no":
-            self.classifier = nn.Linear(self.in_planes, self.num_classes)
-        elif self.neck == "bnneck":
-            self.bottleneck = nn.BatchNorm1d(self.in_planes)
-            self.classifier = nn.Linear(self.in_planes, self.num_classes, bias=False)
-            self.bottleneck.bias.requires_grad_(False)  # no shift
-
-            self.bottleneck.apply(weights_init_kaiming)
-            self.classifier.apply(weights_init_classifier)
-
-    def forward(self, x, target):
-        return self.base(x, target)
-
-    def common_forward(self, x):
-        encoder_features = self.base.model.backbone(x)
-        backbone_mask = torch.cat(
-            (self.fuse_backbone_1(encoder_features[-1]), self.fuse_backbone_2(encoder_features[-2])), dim=1
-        )
-        fpn_output = self.base.model.fpn(encoder_features)
-        return fpn_output, backbone_mask
-
-    def reid_on_features(self, fpn_output, backbone_mask, boxes, src_shape):
-        global_feat = fpn_output
-        m1 = nn.functional.relu(torch.cat((self.fuse_1_1(global_feat[0]), self.fuse_1_2(global_feat[1])), dim=1))
-        m2 = nn.functional.relu(torch.cat((self.fuse_1_3(global_feat[3]), self.fuse_1_4(global_feat[4])), dim=1))
-        global_feat = self.feature_head(
-            [
-                nn.functional.relu(
-                    torch.cat((self.fuse_1(m1), self.fuse_2(global_feat[2]), self.fuse_3(m2), backbone_mask), dim=1)
-                )
-            ]
-        )[0]
-
-        global_feat = roi_align(
-            global_feat, boxes, output_size=(1, 1), spatial_scale=global_feat.shape[-2] / src_shape[-2], aligned=True
-        )
-
-        global_feat = global_feat.view(global_feat.shape[0], -1)
-        if self.neck == "no":
-            feat = global_feat
-        elif self.neck == "bnneck":
-            feat = self.bottleneck(global_feat)  # normalize for angular softmax
-
-        if self.neck_feat == "after":
-            return feat
-        else:
-            return global_feat
-
-    def detect_on_features(self, fpn_output, src_shape, img_info: Optional[Dict[str, torch.Tensor]] = None):
-        x_class = self.base.model.class_net(fpn_output)
-        x_box = self.base.model.box_net(fpn_output)
-        class_out, cls_un_al, cls_un_ep, box_out, box_un_al, box_un_ep, indices, classes = _post_process(
-            x_class,
-            x_box,
-            num_levels=self.base.num_levels,
-            num_classes=self.base.num_classes,
-            max_detection_points=self.base.max_detection_points,
-            num_gmm=self.base.num_gmm,
-            predict_uncertainties=self.base.predict_uncertainties,
-        )
-        if img_info is None:
-            img_scale, img_size = None, None
-        else:
-            img_scale, img_size = img_info["img_scale"], img_info["img_size"]
-        return _batch_detection(
-            src_shape[0],
-            class_out,
-            cls_un_al,
-            cls_un_ep,
-            box_out,
-            box_un_al,
-            box_un_ep,
-            self.base.anchors.boxes,
-            indices,
-            classes,
-            img_scale,
-            img_size,
-            max_det_per_image=self.base.max_det_per_image,
-            soft_nms=self.base.soft_nms,
-        )
-
-    def reid_forward(self, x, target):
-        x, box = x
-        encoder_features = self.base.model.backbone(x)
-        backbone_mask = torch.cat(
-            (self.fuse_backbone_1(encoder_features[-1]), self.fuse_backbone_2(encoder_features[-2])), dim=1
-        )
-        global_feat = self.base.model.fpn(encoder_features)
-        m1 = nn.functional.relu(torch.cat((self.fuse_1_1(global_feat[0]), self.fuse_1_2(global_feat[1])), dim=1))
-        m2 = nn.functional.relu(torch.cat((self.fuse_1_3(global_feat[3]), self.fuse_1_4(global_feat[4])), dim=1))
-        global_feat = self.feature_head(
-            [
-                nn.functional.relu(
-                    torch.cat((self.fuse_1(m1), self.fuse_2(global_feat[2]), self.fuse_3(m2), backbone_mask), dim=1)
-                )
-            ]
-        )[0]
-
-        global_feat = roi_align(
-            global_feat,
-            box[0].float(),
-            output_size=(1, 1),
-            spatial_scale=global_feat.shape[-2] / x.shape[-2],
-            aligned=True,
-        )
-
-        global_feat = global_feat.view(global_feat.shape[0], -1)
-        if self.neck == "no":
-            feat = global_feat
-        elif self.neck == "bnneck":
-            feat = self.bottleneck(global_feat)  # normalize for angular softmax
-
-        if self.training:
-            cls_score = self.classifier(feat)
-            return cls_score, global_feat, target.flatten()  # global feature for triplet loss
-        else:
-            if self.neck_feat == "after":
-                return feat, (sum(target[0], []), sum([list(el) for el in target[1]], []))  # feat
-            else:
-                return global_feat, target
-
-
-class ReidEvalBench(nn.Module):
-    def __init__(self, model):
-        super(ReidEvalBench, self).__init__()
-        self.base = model
-
-    def forward(self, *x):
-        return self.base.reid_forward(*x)
-
-
-def unwrap_bench(model):
-    # Unwrap a model in support bench so that various other fns can access the weights and attribs of the
-    # underlying model directly
-    if hasattr(model, "module"):  # unwrap DDP or EMA
-        return unwrap_bench(model.module)
-    elif hasattr(model, "model"):  # unwrap Bench -> model
-        return unwrap_bench(model.model)
-    else:
-        return model

@@ -5,6 +5,9 @@ Paper: https://arxiv.org/abs/1911.09070
 
 Hacked together by Ross Wightman
 """
+# from turtle import forward
+import re
+# from turtle import forward
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,6 +21,9 @@ from functools import partial
 from timm import create_model
 from timm.models.layers import create_conv2d, create_pool2d, Swish, get_act_layer
 from .config import get_fpn_config, set_config_writeable, set_config_readonly
+
+
+from kate.models.network import load_net
 
 _DEBUG = False
 
@@ -455,23 +461,59 @@ class HeadNet(nn.Module):
 
 
 class SegmHead(nn.Module):
-    def __init__(self):
+    def __init__(self, num_levels: int = 5, in_ch: int = 88, inter_ch: int = 14, out_ch: int = 1):
         super(SegmHead, self).__init__()
-        in_ch = 88
-        out_ch = 14
-        self.decode = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=in_ch, out_channels=out_ch, kernel_size=(2, 2), stride=(2, 2)),
-            nn.ConvTranspose2d(in_channels=out_ch, out_channels=out_ch, kernel_size=(2, 2), stride=(2, 2)),
-            nn.ConvTranspose2d(in_channels=out_ch, out_channels=out_ch, kernel_size=(2, 2), stride=(2, 2)),
-            nn.ConvTranspose2d(in_channels=out_ch, out_channels=out_ch, kernel_size=(2, 2), stride=(2, 2)),
-            nn.ConvTranspose2d(in_channels=out_ch, out_channels=out_ch, kernel_size=(2, 2), stride=(2, 2)),
-            nn.ConvTranspose2d(in_channels=out_ch, out_channels=out_ch, kernel_size=(2, 2), stride=(2, 2)),
-            nn.ConvTranspose2d(in_channels=out_ch, out_channels=out_ch, kernel_size=(2, 2), stride=(2, 2)),
-            nn.Conv2d(in_channels=out_ch, out_channels=1, kernel_size=(1, 1), stride=(1, 1)),
-        )
+        self.in_ch = in_ch
+        self.out_ch = out_ch
+        self.inter_ch = inter_ch
+        self.num_levels = num_levels
+        # self.mini_heads = [self.create_one_mini_head(reduction=2**level) for level in range(1, num_levels + 1)]
+        # self.mini_heads = self.create_one_mini_head(4)
+        self.create_mini_heads()
+        self.merge = nn.Conv2d(in_channels=self.inter_ch * self.num_levels, out_channels=self.out_ch, kernel_size=(1, 1), stride=(1, 1))
 
-    def forward(self, x):
-        return self.decode(x)
+    def create_mini_heads(self):
+        self.mini_heads = []
+        for level in range(1, self.num_levels + 1):
+            reduction = 2**level
+            self.mini_heads.append(OneSegmHead(reduction=reduction, in_ch=self.in_ch, inter_ch=self.inter_ch).cuda())
+
+
+    def forward_(self, x: List[torch.Tensor]):
+        head_out = []
+        for i, head in enumerate(self.mini_heads):
+            head_out.append(head(x[i]))
+
+        # x_minis = self.mini_heads(x)
+        x_cat = torch.cat(head_out, dim=1)
+        x_out = self.merge(x_cat)
+        return x_out
+
+    def forward(self, x: List[torch.Tensor]):
+        return self.forward_(x)
+
+
+class OneSegmHead(nn.Module):
+    def __init__(self, reduction: int, in_ch: int = 88, inter_ch: int = 14):
+        super(OneSegmHead, self).__init__()
+        self.in_ch = in_ch
+        self.inter_ch = inter_ch
+        self.reduction = reduction
+        self.create_layer()
+
+    def create_layer(self):
+        num_layers = int(math.log2(self.reduction))
+        layers = []
+        for i in range(num_layers):
+            if i == 0:
+                in_ch, out_ch = self.in_ch, self.inter_ch
+            else:
+                in_ch, out_ch = self.inter_ch, self.inter_ch
+            layers.append(nn.ConvTranspose2d(in_channels=in_ch, out_channels=out_ch, kernel_size=(2, 2), stride=(2, 2)))
+        self.layer = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor):
+        return self.layer(x)
 
 
 def _init_weight(m, n='', ):
@@ -571,23 +613,83 @@ def get_feature_info(backbone):
     return feature_info
 
 
+class SEResnet(nn.Module):
+    def __init__(self, out_indices):
+        super(SEResnet, self).__init__()
+        backbone_name = 'seresnet18'
+        self.backbone, _ = load_net(
+            model=backbone_name,
+            channels='jeremy_original',
+            weights='s3://astralai-trains/kate/models/KATE_CANCER/seresnet18.d9d1df73e7dc4551b21887a4b7bea869/models/model_best.pkl',
+            strict_load=True,
+            seed=33,
+            seq_len=1,
+            arch_type="2D",
+            writer=None,
+            norm_layer=None,
+        )
+        self.out_indices = out_indices
+        assert len(self.out_indices) <= 5
+        self.configure_out()
+        self.configure_feat_info()
+
+    def configure_out(self):
+        if len(self.out_indices) == 5:
+            self.backbone = torch.nn.Sequential(torch.nn.Sequential(self.backbone.model.conv1, self.backbone.model.bn1, self.backbone.model.relu,
+            self.backbone.model.maxpool), self.backbone.model.layer1, self.backbone.model.layer2,
+            self.backbone.model.layer3, self.backbone.model.layer4)
+        elif len(self.out_indices) == 4:
+            self.backbone = torch.nn.Sequential(torch.nn.Sequential(self.backbone.model.conv1, self.backbone.model.bn1, self.backbone.model.relu,
+            self.backbone.model.maxpool, self.backbone.model.layer1), self.backbone.model.layer2,
+            self.backbone.model.layer3, self.backbone.model.layer4)
+        elif len(self.out_indices) == 3:
+            self.backbone = torch.nn.Sequential(torch.nn.Sequential(self.backbone.model.conv1, self.backbone.model.bn1, self.backbone.model.relu,
+            self.backbone.model.maxpool, self.backbone.model.layer1, self.backbone.model.layer2),
+            self.backbone.model.layer3, self.backbone.model.layer4)
+        elif len(self.out_indices) == 2:
+            self.backbone = torch.nn.Sequential(torch.nn.Sequential(self.backbone.model.conv1, self.backbone.model.bn1, self.backbone.model.relu,
+            self.backbone.model.maxpool, self.backbone.model.layer1, self.backbone.model.layer2, self.backbone.model.layer3), self.backbone.model.layer4)
+        elif len(self.out_indices) == 1:
+            self.backbone = torch.nn.Sequential(torch.nn.Sequential(self.backbone.model.conv1, self.backbone.model.bn1, self.backbone.model.relu,
+            self.backbone.model.maxpool, self.backbone.model.layer1, self.backbone.model.layer2, self.backbone.model.layer3, self.backbone.model.layer4))
+
+    def configure_feat_info(self):
+        all_feature_info = [{'num_chs': 64, 'reduction': 4}, {'num_chs': 64, 'reduction': 4},
+                            {'num_chs': 128, 'reduction': 8}, {'num_chs': 256, 'reduction': 16}, {'num_chs': 512, 'reduction': 32}]
+        self.feature_info = []
+        for ind in self.out_indices:
+            self.feature_info.append(all_feature_info[ind])
+
+    def forward(self, x):
+        output = []
+        for i, l in enumerate(self.backbone):
+            x = l(x)
+            output.append(x)
+        return output
+
 class EfficientDet(nn.Module):
 
-    def __init__(self, config, pretrained_backbone=True, alternate_init=False):
+    def __init__(self, config, pretrained_backbone=True, alternate_init=False, use_segm_branch=False, use_custom_seresnet=False):
         super(EfficientDet, self).__init__()
         self.config = config
+        self.use_segm_branch = use_segm_branch
         set_config_readonly(self.config)
-        self.backbone = create_model(
-            config.backbone_name, features_only=True,
-            out_indices=self.config.backbone_indices or (2, 3, 4),
-            pretrained=pretrained_backbone, **config.backbone_args)
-        # self.backbone.conv_stem.in_channels = 2
-        self.backbone.conv_stem = nn.Conv2d(2, self.backbone.conv_stem.out_channels, (3, 3), stride=(2, 2), bias=False)
-        feature_info = get_feature_info(self.backbone)
+        if use_custom_seresnet:
+            self.backbone = SEResnet(config.backbone_indices or (2, 3, 4))
+            feature_info = self.backbone.feature_info
+        else:
+            self.backbone = create_model(
+                config.backbone_name, features_only=True,
+                out_indices=self.config.backbone_indices or (2, 3, 4),
+                pretrained=pretrained_backbone, **config.backbone_args)
+            self.backbone.conv_stem = nn.Conv2d(2, self.backbone.conv_stem.out_channels, (3, 3), stride=(2, 2), bias=False)
+            feature_info = get_feature_info(self.backbone)
+
         self.fpn = BiFpn(self.config, feature_info)
         self.class_net = HeadNet(self.config, num_outputs=self.config.num_classes * self.config.gaussian_count * 3)
         self.box_net = HeadNet(self.config, num_outputs=4 * self.config.gaussian_count * 3)
-        self.segm = SegmHead()
+        if self.use_segm_branch:
+            self.segm = SegmHead(num_levels=self.config.num_levels, in_ch=self.config.fpn_channels, inter_ch=5, out_ch=self.config.num_classes)
 
         for n, m in self.named_modules():
             if 'backbone' not in n:
@@ -638,7 +740,10 @@ class EfficientDet(nn.Module):
     def forward(self, x):
         x = self.backbone(x)
         x = self.fpn(x)
-        # x_segm = self.segm(x[-1])
+        if self.use_segm_branch:
+            x_segm = self.segm(x)
         x_class = self.class_net(x)
         x_box = self.box_net(x)
-        return x_class, x_box #, x_segm
+        if self.use_segm_branch:
+            return x_class, x_box, x_segm
+        return x_class, x_box
