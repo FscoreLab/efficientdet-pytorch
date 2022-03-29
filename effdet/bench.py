@@ -412,3 +412,14 @@ def weights_init_classifier(m):
         nn.init.normal_(m.weight, std=0.001)
         if m.bias:
             nn.init.constant_(m.bias, 0.0)
+
+
+def unwrap_bench(model):
+    # Unwrap a model in support bench so that various other fns can access the weights and attribs of the
+    # underlying model directly
+    if hasattr(model, 'module'):  # unwrap DDP or EMA
+        return unwrap_bench(model.module)
+    elif hasattr(model, 'model'):  # unwrap Bench -> model
+        return unwrap_bench(model.model)
+    else:
+        return model
